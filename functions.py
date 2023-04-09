@@ -3,6 +3,7 @@ import base64
 import config
 import copy
 import uuid
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 
@@ -68,17 +69,7 @@ def order_split_required(order):
     total_pouches = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in order['items']])
     return total_pouches > 9
 
-
-def check_custom_field_and_add_gnome(order):
-    custom_field_1 = order['advancedOptions'].get('customField1', '')
-
-    if "First" in custom_field_1:
-        order['items'].append(config.gnome)
-        return True
-
-    return False
-
-def apply_preset_based_on_pouches(order, mlp_data, gnome_added=False):
+def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     processed_items = []
     total_pouches = 0
 
@@ -88,10 +79,8 @@ def apply_preset_based_on_pouches(order, mlp_data, gnome_added=False):
         total_pouches += item['quantity'] * config.sku_to_pouches.get(item['sku'], 0)
 
     order['items'] = processed_items
-
-    preset_dict = config.presets_with_gnome if gnome_added else config.presets
+    preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
     preset = preset_dict[str(total_pouches)]
-
     order['weight'] = preset['weight']
     order.update(preset)
     order['advancedOptions'].update(preset['advancedOptions'])  # Update advancedOptions separately
@@ -99,16 +88,19 @@ def apply_preset_based_on_pouches(order, mlp_data, gnome_added=False):
     return order
 
 
-def set_stk_order_tag(order, need_stk_tag):
-    if need_stk_tag:
-        if 'customField1' not in order['advancedOptions']:
-            order['advancedOptions']['customField1'] = ""
 
-        if len(order['advancedOptions']['customField1']) == 0:
-            order['advancedOptions']['customField1'] = "STK-Order"
+def set_stk_order_tag(order):
+    if any((item['sku'] == 'OTP - STK' or item['sku'] == 'OTP - LYL') for item in order['items']):
+        if order['advancedOptions'].get('customField1') is None:
+            order['advancedOptions']['customField1'] = ""
+            order['advancedOptions']['customField1'] += "STK-Order"
         else:
             order['advancedOptions']['customField1'] = "STK-Order, " + order['advancedOptions']['customField1']
     return order
+
+def should_add_gnome_to_parent_order(parent_order):
+    custom_field1 = parent_order['advancedOptions'].get('customField1', "")
+    return isinstance(custom_field1, str) and "First" in custom_field1
 
 
 def process_order(order, mlp_data):
@@ -118,22 +110,24 @@ def process_order(order, mlp_data):
         # Prepare the child orders and parent order
         original_order, child_orders = prepare_split_data(order, need_stk_tag, mlp_data)
 
-        with ThreadPoolExecutor() as executor:
-            # Update all child orders in a single request
-            future1 = executor.submit(session.post, 'https://ssapi.shipstation.com/orders/createorders', data=json.dumps(child_orders))
+        print(f"Child orders check 2: {child_orders}")
+        print(f"Parent order check 2: {original_order}")
 
-            # Update the parent order in ShipStation
-            future2 = executor.submit(session.post, 'https://ssapi.shipstation.com/orders/createorder', data=json.dumps(original_order))
+        child_responses = []
+        for index, child_order in enumerate(child_orders):
+            response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(child_order))
+            child_responses.append(response)
 
-            response1 = future1.result()
-            response2 = future2.result()
 
-        if response1.status_code == 200:
+        # Update the parent order in ShipStation
+        response2 = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(original_order))
+
+        '''if response1.status_code == 200:
             print(f"Successfully created {len(child_orders)} children")
             print(f"Full success response: {response1.__dict__}")
         else:
             print(f"Unexpected status code for child orders: {response1.status_code}")
-            print(f"Full error response: {response1.__dict__}")
+            print(f"Full error response: {response1.__dict__}")'''
 
         if response2.status_code == 200:
             print(f"Parent order created successfully")
@@ -145,9 +139,13 @@ def process_order(order, mlp_data):
         return f"Successfully processed order #{order['orderNumber']}"
 
     else:
-        gnome_added = check_custom_field_and_add_gnome(order)
-        order = apply_preset_based_on_pouches(order, mlp_data, gnome_added)
-        order = set_stk_order_tag(order, need_stk_tag)
+        if should_add_gnome_to_parent_order(order):
+            gnome_item = config.gnome_item
+            order['items'].append(gnome_item)
+            order = apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=True)
+        else:
+            order = apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False)
+        order = set_stk_order_tag(order)
         response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
 
         if response.status_code == 200:
@@ -162,8 +160,6 @@ def process_order(order, mlp_data):
 
 def prepare_split_data(order, need_stk_tag, mlp_data):
     original_order = copy.deepcopy(order)  # Create a deep copy of the order object
-    gnome_added = check_custom_field_and_add_gnome(original_order)
-    original_order = prepare_parent_order(original_order, mlp_data, gnome_added)
     child_orders = []
 
     total_pouches = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in original_order['items']])
@@ -196,8 +192,13 @@ def prepare_split_data(order, need_stk_tag, mlp_data):
     total_shipments = shipment_counter
 
     remaining_pouches_total = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in original_order['items']])
-    original_order = apply_preset_based_on_pouches(original_order, mlp_data)
 
+    if should_add_gnome_to_parent_order(original_order):
+        gnome = config.gnome
+        original_order['items'].append(gnome)
+        original_order = apply_preset_based_on_pouches(original_order, mlp_data, use_gnome_preset=True)
+    else:
+        original_order = apply_preset_based_on_pouches(original_order, mlp_data)
 
     original_order['items'] = [item for item in original_order['items'] if item['quantity'] > 0]
     original_order['orderNumber'] = f"{original_order['orderNumber']}-1"
@@ -208,25 +209,17 @@ def prepare_split_data(order, need_stk_tag, mlp_data):
         child_order['orderNumber'] = f"{order['orderNumber']}-{i + 2}"
         child_order['advancedOptions']['customField2'] = f"Shipment {i + 2} of {total_shipments}"
         if need_stk_tag:
-            child_order = set_stk_order_tag(child_order, need_stk_tag)
+            child_order = set_stk_order_tag(child_order)
             need_stk_tag = False
         child_orders[i] = child_order
 
     if need_stk_tag:
-        original_order = set_stk_order_tag(original_order, need_stk_tag)
+        original_order = set_stk_order_tag(original_order)
         need_stk_tag = False
 
     print(f"Parent order: {original_order}")
     print(f"Child_orders: {child_orders}")
     return original_order, child_orders
-
-def prepare_parent_order(order, mlp_data, gnome_added):
-    order = apply_preset_based_on_pouches(order, mlp_data, gnome_added)
-    order['advancedOptions'].pop('parentId', None)  # Remove the parentId value for the parent order
-    order['advancedOptions']['mergedOrSplit'] = True
-    order['advancedOptions']['billToParty'] = "my_other_account"
-
-    return order
 
 
 def prepare_child_order(parent_order, child_order_items, mlp_data):
@@ -244,6 +237,19 @@ def prepare_child_order(parent_order, child_order_items, mlp_data):
     # Update advanced options to reflect the relationship between the parent and child orders
     child_order['advancedOptions']['mergedOrSplit'] = True
     child_order['advancedOptions']['parentId'] = parent_order['orderId']
+    parent_order['advancedOptions']['mergedOrSplit'] = True
+    parent_order['advancedOptions'].pop('parentId', None)  # Remove the parentId value for the parent order
     child_order['advancedOptions']['billToParty'] = "my_other_account"
+    parent_order['advancedOptions']['billToParty'] = "my_other_account"
 
     return child_order
+
+
+
+def test_order():
+    order_data = {"orderNumber":"100724","orderKey":"f3d72157-a212-5e31-20a2-9375205e2566","orderDate":"2023-04-09T04:59:18.0000000","createDate":"2023-04-09T05:00:42.3200000","modifyDate":"2023-04-09T05:00:43.6130000","paymentDate":"2023-04-09T04:59:18.0000000","shipByDate":None,"orderStatus":"awaiting_shipment","customerId":115007741,"customerUsername":"test@testing.com","customerEmail":"test@testing.com","billTo":{"name":"Test Order Do Not Print","company":None,"street1":"","street2":None,"street3":None,"city":"","state":None,"postalCode":"","country":" ","phone":"","residential":None,"addressVerified":None},"shipTo":{"name":"Test Order Do Not Print","company":None,"street1":"1234 Fake Ave","street2":"","street3":None,"city":"Fakesville","state":"CA","postalCode":"90291-6410","country":"US","phone":"","residential":False,"addressVerified":"Address validation warning"},"items":[{"orderItemId":352756346,"lineItemKey":None,"sku":"OTP - LCP","name":"Spring Lawn Fertilizer Kit: Liquid Lawn Food and Iron Bundle","imageUrl":None,"weight":None,"quantity":5,"unitPrice":0.00,"taxAmount":None,"shippingAmount":None,"warehouseLocation":None,"options":[],"productId":23065056,"fulfillmentSku":None,"adjustment":False,"upc":None,"createDate":"2023-04-09T05:00:42.373","modifyDate":"2023-04-09T05:00:42.373"},{"orderItemId":352756347,"lineItemKey":None,"sku":"SUB - LG - S","name":"Lawn Guard - Standard","imageUrl":None,"weight":None,"quantity":1,"unitPrice":0.00,"taxAmount":None,"shippingAmount":None,"warehouseLocation":None,"options":[],"productId":23064771,"fulfillmentSku":None,"adjustment":False,"upc":None,"createDate":"2023-04-09T05:00:42.373","modifyDate":"2023-04-09T05:00:42.373"},{"orderItemId":352756348,"lineItemKey":None,"sku":"OTP - WNF","name":"Spring Lawn Weed & Feed Kit","imageUrl":None,"weight":None,"quantity":3,"unitPrice":0.00,"taxAmount":None,"shippingAmount":None,"warehouseLocation":None,"options":[],"productId":23064761,"fulfillmentSku":None,"adjustment":False,"upc":None,"createDate":"2023-04-09T05:00:42.373","modifyDate":"2023-04-09T05:00:42.373"},{"orderItemId":352756349,"lineItemKey":None,"sku":"SUB - MLPA - S","name":"Magic Lawn Plan Annual - Standard","imageUrl":None,"weight":None,"quantity":4,"unitPrice":0.00,"taxAmount":None,"shippingAmount":None,"warehouseLocation":None,"options":[],"productId":23064928,"fulfillmentSku":None,"adjustment":False,"upc":None,"createDate":"2023-04-09T05:00:42.373","modifyDate":"2023-04-09T05:00:42.373"},{"orderItemId":352756350,"lineItemKey":None,"sku":"SUB - SFLP - S","name":"South Florida Lawn Care Plans - Small Florida Yard","imageUrl":None,"weight":None,"quantity":11,"unitPrice":0.00,"taxAmount":None,"shippingAmount":None,"warehouseLocation":None,"options":[],"productId":23065022,"fulfillmentSku":None,"adjustment":False,"upc":None,"createDate":"2023-04-09T05:00:42.373","modifyDate":"2023-04-09T05:00:42.373"},{"orderItemId":352756351,"lineItemKey":None,"sku":"OTP - STK","name":"Soil Test Kit","imageUrl":None,"weight":None,"quantity":1,"unitPrice":0.00,"taxAmount":None,"shippingAmount":None,"warehouseLocation":None,"options":[],"productId":23066068,"fulfillmentSku":None,"adjustment":False,"upc":None,"createDate":"2023-04-09T05:00:42.373","modifyDate":"2023-04-09T05:00:42.373"},{"orderItemId":352756352,"lineItemKey":None,"sku":"OTP - GG","name":"Green Glow: Concentrated Liquid Nitrogen Fertilizer","imageUrl":None,"weight":None,"quantity":8,"unitPrice":0.00,"taxAmount":None,"shippingAmount":None,"warehouseLocation":None,"options":[],"productId":23065689,"fulfillmentSku":None,"adjustment":False,"upc":None,"createDate":"2023-04-09T05:00:42.373","modifyDate":"2023-04-09T05:00:42.373"},{"orderItemId":352756353,"lineItemKey":None,"sku":"OTP - SB","name":"Soil Balance: Lawn Starter for New and High-Traffic Lawns","imageUrl":None,"weight":None,"quantity":7,"unitPrice":0.00,"taxAmount":None,"shippingAmount":None,"warehouseLocation":None,"options":[],"productId":23065663,"fulfillmentSku":None,"adjustment":False,"upc":None,"createDate":"2023-04-09T05:00:42.373","modifyDate":"2023-04-09T05:00:42.373"}],"orderTotal":0.00,"amountPaid":0.00,"taxAmount":0.00,"shippingAmount":0.00,"customerNotes":None,"internalNotes":None,"gift":False,"giftMessage":None,"paymentMethod":None,"requestedShippingService":None,"carrierCode":None,"serviceCode":None,"packageCode":None,"confirmation":"none","shipDate":None,"holdUntilDate":None,"weight":{"value":0.00,"units":"ounces","WeightUnits":1},"dimensions":None,"insuranceOptions":{"provider":None,"insureShipment":False,"insuredValue":0.0},"internationalOptions":{"contents":None,"customsItems":None,"nonDelivery":None},"advancedOptions":{"warehouseId":242018,"nonMachinable":False,"saturdayDelivery":False,"containsAlcohol":False,"mergedOrSplit":False,"mergedIds":[],"parentId":None,"storeId":310067,"customField1":"Subscription First Order","customField2":None,"customField3":None,"source":None,"billToParty":None,"billToAccount":None,"billToPostalCode":None,"billToCountryCode":None,"billToMyOtherAccount":None},"tagIds":None,"userId":None,"externallyFulfilled":False,"externallyFulfilledBy":None,"externallyFulfilledById":None,"externallyFulfilledByName":None,"labelMessages":None}
+    order_data['orderKey'] = str(uuid.uuid4())
+    order_data['orderNumber'] = str(random.randrange(1000000, 9999999))
+    response = session.post('https://ssapi.shipstation.com/orders/createorder', json=order_data)
+    orders = session.get(f"https://ssapi.shipstation.com/orders?orderNumber={order_data['orderNumber']}").json()['orders']
+    return orders[0]
