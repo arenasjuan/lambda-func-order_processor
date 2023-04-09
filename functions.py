@@ -1,6 +1,10 @@
 import requests
 import base64
 import config
+import copy
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -64,7 +68,17 @@ def order_split_required(order):
     total_pouches = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in order['items']])
     return total_pouches > 9
 
-def apply_preset_based_on_pouches(order, mlp_data):
+
+def check_custom_field_and_add_gnome(order):
+    custom_field_1 = order['advancedOptions'].get('customField1', '')
+
+    if "First" in custom_field_1:
+        order['items'].append(config.gnome)
+        return True
+
+    return False
+
+def apply_preset_based_on_pouches(order, mlp_data, gnome_added=False):
     processed_items = []
     total_pouches = 0
 
@@ -74,7 +88,10 @@ def apply_preset_based_on_pouches(order, mlp_data):
         total_pouches += item['quantity'] * config.sku_to_pouches.get(item['sku'], 0)
 
     order['items'] = processed_items
-    preset = config.presets[str(total_pouches)]
+
+    preset_dict = config.presets_with_gnome if gnome_added else config.presets
+    preset = preset_dict[str(total_pouches)]
+
     order['weight'] = preset['weight']
     order.update(preset)
     order['advancedOptions'].update(preset['advancedOptions'])  # Update advancedOptions separately
@@ -128,7 +145,8 @@ def process_order(order, mlp_data):
         return f"Successfully processed order #{order['orderNumber']}"
 
     else:
-        order = apply_preset_based_on_pouches(order, mlp_data)
+        gnome_added = check_custom_field_and_add_gnome(order)
+        order = apply_preset_based_on_pouches(order, mlp_data, gnome_added)
         order = set_stk_order_tag(order, need_stk_tag)
         response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
 
@@ -144,6 +162,8 @@ def process_order(order, mlp_data):
 
 def prepare_split_data(order, need_stk_tag, mlp_data):
     original_order = copy.deepcopy(order)  # Create a deep copy of the order object
+    gnome_added = check_custom_field_and_add_gnome(original_order)
+    original_order = prepare_parent_order(original_order, mlp_data, gnome_added)
     child_orders = []
 
     total_pouches = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in original_order['items']])
@@ -169,7 +189,7 @@ def prepare_split_data(order, need_stk_tag, mlp_data):
                 item_copy['quantity'] = temp_quantity
                 child_order_items.append(item_copy)
 
-        child_order = prepare_child_order(original_order, child_order_items)
+        child_order = prepare_child_order(original_order, child_order_items, mlp_data)
         child_orders.append(child_order)
         shipment_counter += 1
 
@@ -200,6 +220,14 @@ def prepare_split_data(order, need_stk_tag, mlp_data):
     print(f"Child_orders: {child_orders}")
     return original_order, child_orders
 
+def prepare_parent_order(order, mlp_data, gnome_added):
+    order = apply_preset_based_on_pouches(order, mlp_data, gnome_added)
+    order['advancedOptions'].pop('parentId', None)  # Remove the parentId value for the parent order
+    order['advancedOptions']['mergedOrSplit'] = True
+    order['advancedOptions']['billToParty'] = "my_other_account"
+
+    return order
+
 
 def prepare_child_order(parent_order, child_order_items, mlp_data):
     child_order = copy.deepcopy(parent_order)
@@ -216,9 +244,6 @@ def prepare_child_order(parent_order, child_order_items, mlp_data):
     # Update advanced options to reflect the relationship between the parent and child orders
     child_order['advancedOptions']['mergedOrSplit'] = True
     child_order['advancedOptions']['parentId'] = parent_order['orderId']
-    parent_order['advancedOptions']['mergedOrSplit'] = True
-    parent_order['advancedOptions'].pop('parentId', None)  # Remove the parentId value for the parent order
     child_order['advancedOptions']['billToParty'] = "my_other_account"
-    parent_order['advancedOptions']['billToParty'] = "my_other_account"
 
     return child_order
