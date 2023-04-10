@@ -28,7 +28,7 @@ def processor(order):
         url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order['orderNumber']}"
         response_mlp = session.get(url_mlp)
         data_mlp = response_mlp.json()
-        print(data_mlp)
+        print(data_mlp) 
         plan_details = data_mlp.get("plan_details", [])
         for detail in plan_details:
             product_list = []
@@ -44,6 +44,7 @@ def processor(order):
 def extract_data_from_resource_url(event):
     payload = json.loads(event["body"])
     resource_url = payload['resource_url']
+    print(f"Fetching data from resource url: {resource_url}")
     response = session.get(resource_url)
     data = response.json()
     orders = data['orders']
@@ -72,25 +73,48 @@ def order_split_required(order):
 def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     processed_items = []
     total_pouches = 0
+    special_items = {'OTP - STK': 0, 'OTP - HES': 0}
 
     for item in order['items']:
         process_item(item, mlp_data)
         processed_items.append(item)
         total_pouches += item['quantity'] * config.sku_to_pouches.get(item['sku'], 0)
+        if item['sku'] in special_items:
+            special_items[item['sku']] += item['quantity']
 
     order['items'] = processed_items
+
     preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
-    preset = preset_dict[str(total_pouches)]
-    order['weight'] = preset['weight']
-    order.update(preset)
-    order['advancedOptions'].update(preset['advancedOptions'])  # Update advancedOptions separately
 
-    return order
+    if special_items['OTP - STK'] == 1 and sum(special_items.values()) == 1:
+        preset_key = 'STK'
+    elif special_items['OTP - HES'] > 0 and sum(special_items.values()) == special_items['OTP - HES']:
+        hes_base_weight = presets['HES']['base_weights'][special_items['OTP - HES']]
+        presets['HES']['weight'] = {"value": hes_base_weight, "units": "ounces", "WeightUnits": 1}
+        preset_key = 'HES'
+    else:
+        preset_key = str(total_pouches)
 
+    preset = preset_dict[preset_key]
+
+    updated_order = order.copy()
+    updated_order['weight'] = preset['weight']
+    updated_order.update(preset)
+
+    if 'advancedOptions' in order and 'advancedOptions' in preset:
+        updated_advanced_options = {**order['advancedOptions'], **preset['advancedOptions']}
+    elif 'advancedOptions' in order:
+        updated_advanced_options = order['advancedOptions']
+    else:
+        updated_advanced_options = preset['advancedOptions']
+
+    updated_order['advancedOptions'] = updated_advanced_options
+
+    return updated_order
 
 
 def set_stk_order_tag(order):
-    if any((item['sku'] == 'OTP - STK' or item['sku'] == 'OTP - LYL') for item in order['items']):
+    if any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items']):
         if order['advancedOptions'].get('customField1') is None:
             order['advancedOptions']['customField1'] = ""
             order['advancedOptions']['customField1'] += "STK-Order"
@@ -106,9 +130,11 @@ def should_add_gnome_to_parent_order(parent_order):
 def process_order(order, mlp_data):
     need_stk_tag = any(item['sku'] == 'OTP - STK' for item in order['items'])
 
+    need_gnome = should_add_gnome_to_parent_order(order)
+
     if order_split_required(order):
         # Prepare the child orders and parent order
-        original_order, child_orders = prepare_split_data(order, need_stk_tag, mlp_data)
+        original_order, child_orders = prepare_split_data(order, need_stk_tag, mlp_data, need_gnome)
 
         print(f"Child orders check 2: {child_orders}")
         print(f"Parent order check 2: {original_order}")
@@ -122,13 +148,6 @@ def process_order(order, mlp_data):
         # Update the parent order in ShipStation
         response2 = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(original_order))
 
-        '''if response1.status_code == 200:
-            print(f"Successfully created {len(child_orders)} children")
-            print(f"Full success response: {response1.__dict__}")
-        else:
-            print(f"Unexpected status code for child orders: {response1.status_code}")
-            print(f"Full error response: {response1.__dict__}")'''
-
         if response2.status_code == 200:
             print(f"Parent order created successfully")
             print(f"Full success response: {response2.__dict__}")
@@ -139,8 +158,8 @@ def process_order(order, mlp_data):
         return f"Successfully processed order #{order['orderNumber']}"
 
     else:
-        if should_add_gnome_to_parent_order(order):
-            gnome_item = config.gnome_item
+        if need_gnome:
+            gnome_item = config.gnome
             order['items'].append(gnome_item)
             order = apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=True)
         else:
@@ -158,7 +177,7 @@ def process_order(order, mlp_data):
         return f"Successfully processed order #{order['orderNumber']} without splitting"
 
 
-def prepare_split_data(order, need_stk_tag, mlp_data):
+def prepare_split_data(order, need_stk_tag, mlp_data, need_gnome):
     original_order = copy.deepcopy(order)  # Create a deep copy of the order object
     child_orders = []
 
@@ -193,7 +212,7 @@ def prepare_split_data(order, need_stk_tag, mlp_data):
 
     remaining_pouches_total = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in original_order['items']])
 
-    if should_add_gnome_to_parent_order(original_order):
+    if need_gnome:
         gnome = config.gnome
         original_order['items'].append(gnome)
         original_order = apply_preset_based_on_pouches(original_order, mlp_data, use_gnome_preset=True)
@@ -229,16 +248,9 @@ def prepare_child_order(parent_order, child_order_items, mlp_data):
     child_order['items'] = child_order_items
     child_order['orderTotal'] = 0.00
     child_order['orderKey'] = str(uuid.uuid4())
-    child_order['paymentDate'] = None
 
-    remaining_pouches_total = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in child_order_items])
     child_order = apply_preset_based_on_pouches(child_order, mlp_data)
 
-    # Update advanced options to reflect the relationship between the parent and child orders
-    child_order['advancedOptions']['mergedOrSplit'] = True
-    child_order['advancedOptions']['parentId'] = parent_order['orderId']
-    parent_order['advancedOptions']['mergedOrSplit'] = True
-    parent_order['advancedOptions'].pop('parentId', None)  # Remove the parentId value for the parent order
     child_order['advancedOptions']['billToParty'] = "my_other_account"
     parent_order['advancedOptions']['billToParty'] = "my_other_account"
 
