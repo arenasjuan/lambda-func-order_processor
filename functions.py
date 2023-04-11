@@ -18,7 +18,7 @@ headers = {
 session = requests.Session()
 session.headers.update(headers)
 
-
+failed = []
 def processor(order):
     mlp_data = {}
 
@@ -74,21 +74,25 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     processed_items = []
     total_pouches = 0
     special_items = {'OTP - STK': 0, 'OTP - HES': 0}
+    total_special_items = 0
 
     for item in order['items']:
         process_item(item, mlp_data)
         processed_items.append(item)
-        total_pouches += item['quantity'] * config.sku_to_pouches.get(item['sku'], 0)
         if item['sku'] in special_items:
             special_items[item['sku']] += item['quantity']
+            total_special_items += item['quantity']
+        else:
+            total_pouches += item['quantity'] * config.sku_to_pouches.get(item['sku'], 0)
 
     order['items'] = processed_items
 
     preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
 
-    if special_items['OTP - STK'] == 1 and sum(special_items.values()) == 1:
+    if special_items['OTP - STK'] == 1 and total_pouches == 0 and total_special_items == 1:
         preset_key = 'STK'
-    elif special_items['OTP - HES'] > 0 and sum(special_items.values()) == special_items['OTP - HES']:
+        order['weight'] = {"value": 4, "units": "ounces", "WeightUnits": 1}
+    elif special_items['OTP - HES'] > 0 and total_pouches == 0 and total_special_items == special_items['OTP - HES']:
         hes_base_weight = presets['HES']['base_weights'][special_items['OTP - HES']]
         presets['HES']['weight'] = {"value": hes_base_weight, "units": "ounces", "WeightUnits": 1}
         preset_key = 'HES'
@@ -98,7 +102,8 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     preset = preset_dict[preset_key]
 
     updated_order = order.copy()
-    updated_order['weight'] = preset['weight']
+    if preset_key != 'STK':
+        updated_order['weight'] = preset['weight']
     updated_order.update(preset)
 
     if 'advancedOptions' in order and 'advancedOptions' in preset:
@@ -112,19 +117,26 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
 
     return updated_order
 
-
 def set_stk_order_tag(order):
-    if any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items']):
+    has_stk_item = any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items'])
+    has_stk_tag = "STK-Order" in order['advancedOptions'].get('customField1', '')
+
+    if has_stk_item and not has_stk_tag:
         if order['advancedOptions'].get('customField1') is None:
             order['advancedOptions']['customField1'] = ""
             order['advancedOptions']['customField1'] += "STK-Order"
         else:
             order['advancedOptions']['customField1'] = "STK-Order, " + order['advancedOptions']['customField1']
+    elif not has_stk_item and has_stk_tag:
+        tags = order['advancedOptions']['customField1'].split(', ')
+        tags.remove("STK-Order")
+        order['advancedOptions']['customField1'] = ', '.join(tags)
+
     return order
 
 def should_add_gnome_to_parent_order(parent_order):
     custom_field1 = parent_order['advancedOptions'].get('customField1', "")
-    return isinstance(custom_field1, str) and "First" in custom_field1
+    return isinstance(custom_field1, str) and "First" in custom_field1 and any(isLawnPlan(item["sku"]) for item in parent_order["items"])
 
 
 def process_order(order, mlp_data):
@@ -149,10 +161,11 @@ def process_order(order, mlp_data):
         response2 = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(original_order))
 
         if response2.status_code == 200:
-            print(f"Parent order created successfully")
+            print(f"Parent order #{original_order['orderNumber']} created successfully")
             print(f"Full success response: {response2.__dict__}")
         else:
-            print(f"Unexpected status code for parent order: {response2.status_code}")
+            failed.append(order['orderNumber'])
+            print(f"Unexpected status code for parent order #{original_order['orderNumber']}: {response2.status_code}")
             print(f"Full error response: {response2.__dict__}")
 
         return f"Successfully processed order #{order['orderNumber']}"
@@ -168,10 +181,11 @@ def process_order(order, mlp_data):
         response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
 
         if response.status_code == 200:
-            print(f"Order updated successfully with preset")
+            print(f"Order #{order['orderNumber']} updated successfully with preset")
             print(f"Full success response: {response.__dict__}")
         else:
-            print(f"Unexpected status code for updating order: {response.status_code}")
+            failed.append(order['orderNumber'])
+            print(f"Unexpected status code for order #{order['orderNumber']}: {response2.status_code}")
             print(f"Full error response: {response.__dict__}")
 
         return f"Successfully processed order #{order['orderNumber']} without splitting"

@@ -10,6 +10,7 @@ def lambda_handler(event, context):
         futures = [executor.submit(functions.processor, order) for order in orders]
         for future in as_completed(futures):
             future.result()
+    print(f"Failed to process orders: {functions.failed}")
 
     return {
         'statusCode': 200,
