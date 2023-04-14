@@ -25,6 +25,8 @@ def processor(order):
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
     if has_lawn_plan:
         print(f"Order {order['orderNumber']} has a lawn plan")
+        if "-" in order['orderNumber']:
+            order_number = order['orderNumber'].split("-")[0]
         url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order['orderNumber']}"
         response_mlp = session.get(url_mlp)
         data_mlp = response_mlp.json()
@@ -70,41 +72,103 @@ def order_split_required(order):
     total_pouches = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in order['items']])
     return total_pouches > 9
 
+
+def should_add_gnome_to_parent_order(parent_order):
+    custom_field1 = parent_order['advancedOptions'].get('customField1', "")
+    return isinstance(custom_field1, str) and "First" in custom_field1 and any(isLawnPlan(item["sku"]) for item in parent_order["items"])
+
+
+
+
+def append_tag_if_not_exists(tag, custom_field):
+    if tag not in custom_field:
+        custom_field += (", " if custom_field else "") + tag
+    return custom_field
+
+def set_order_tags(order, parent_order=None):
+    if not order.get('advancedOptions'):
+        order['advancedOptions'] = {}
+
+    if order['advancedOptions'].get('customField1') is None:
+        order['advancedOptions']['customField1'] = ""
+
+    if parent_order:
+        tags_to_preserve = ["Subscription First Order", "Lone-Star", "South-Florida", "Recurring", "Organic", "Amazon"]
+        parent_tags = parent_order['advancedOptions'].get('customField1', '') or ''
+        for tag in tags_to_preserve:
+            if tag in parent_tags:
+                order['advancedOptions']['customField1'] = append_tag_if_not_exists(tag, order['advancedOptions']['customField1'])
+    else:
+        has_lawn_plan = any("MLP" in item['sku'] for item in order['items'])
+        is_otp_only = all(item['sku'].startswith("OTP") for item in order['items'])
+        is_organic = any("OLFP" in item['sku'] or "Organic" in item['sku'] or "Organic Lawn" in item['name'] for item in order['items'])
+
+        if has_lawn_plan:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Subscription First Order", order['advancedOptions']['customField1'])
+        if is_otp_only:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("OTP-Only", order['advancedOptions']['customField1'])
+        if is_organic:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Organic", order['advancedOptions']['customField1'])
+
+    for item in order['items']:
+        if 'TLP' in item['sku']:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Lone-Star", order['advancedOptions']['customField1'])
+        if 'SFLP' in item['sku']:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("South-Florida", order['advancedOptions']['customField1'])
+
+    # STK-Order functionality
+    has_stk_item = any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items'])
+    has_stk_tag = "STK-Order" in order['advancedOptions']['customField1']
+
+    if has_stk_item:
+        order['advancedOptions']['customField1'] = append_tag_if_not_exists("STK-Order", order['advancedOptions']['customField1'])
+    elif not has_stk_item and has_stk_tag:
+        tags = order['advancedOptions']['customField1'].split(', ')
+        tags.remove("STK-Order")
+        order['advancedOptions']['customField1'] = ', '.join(tags)
+
+    return order
+
+
 def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
-    processed_items = []
     total_pouches = 0
     special_items = {'OTP - STK': 0, 'OTP - HES': 0}
     total_special_items = 0
 
-    for item in order['items']:
+    def process_and_update(item):
+        nonlocal total_pouches, special_items, total_special_items
         process_item(item, mlp_data)
-        processed_items.append(item)
+
         if item['sku'] in special_items:
             special_items[item['sku']] += item['quantity']
             total_special_items += item['quantity']
         else:
             total_pouches += item['quantity'] * config.sku_to_pouches.get(item['sku'], 0)
 
+        return item
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        processed_items = list(executor.map(process_and_update, order['items']))
+
     order['items'] = processed_items
 
     preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
 
-    if special_items['OTP - STK'] == 1 and total_pouches == 0 and total_special_items == 1:
-        preset_key = 'STK'
-        order['weight'] = {"value": 4, "units": "ounces", "WeightUnits": 1}
-    elif special_items['OTP - HES'] > 0 and total_pouches == 0 and total_special_items == special_items['OTP - HES']:
-        hes_base_weight = presets['HES']['base_weights'][special_items['OTP - HES']]
-        presets['HES']['weight'] = {"value": hes_base_weight, "units": "ounces", "WeightUnits": 1}
-        preset_key = 'HES'
+    if total_pouches == 0 and len(order['items']) == 1:
+        if special_items['OTP - STK'] == 1:
+            preset = preset_dict['STK']
+        elif special_items['OTP - HES'] > 0:
+            preset = preset_dict['HES']
+        else:
+            preset_key = str(total_pouches)
+            preset = preset_dict[preset_key]
     else:
         preset_key = str(total_pouches)
-
-    preset = preset_dict[preset_key]
+        preset = preset_dict[preset_key]
 
     updated_order = order.copy()
-    if preset_key != 'STK':
-        updated_order['weight'] = preset['weight']
-    updated_order.update(preset)
+    for key, value in preset.items():
+        updated_order[key] = value
 
     if 'advancedOptions' in order and 'advancedOptions' in preset:
         updated_advanced_options = {**order['advancedOptions'], **preset['advancedOptions']}
@@ -117,26 +181,7 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
 
     return updated_order
 
-def set_stk_order_tag(order):
-    has_stk_item = any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items'])
-    has_stk_tag = "STK-Order" in order['advancedOptions'].get('customField1', '')
 
-    if has_stk_item and not has_stk_tag:
-        if order['advancedOptions'].get('customField1') is None:
-            order['advancedOptions']['customField1'] = ""
-            order['advancedOptions']['customField1'] += "STK-Order"
-        else:
-            order['advancedOptions']['customField1'] = "STK-Order, " + order['advancedOptions']['customField1']
-    elif not has_stk_item and has_stk_tag:
-        tags = order['advancedOptions']['customField1'].split(', ')
-        tags.remove("STK-Order")
-        order['advancedOptions']['customField1'] = ', '.join(tags)
-
-    return order
-
-def should_add_gnome_to_parent_order(parent_order):
-    custom_field1 = parent_order['advancedOptions'].get('customField1', "")
-    return isinstance(custom_field1, str) and "First" in custom_field1 and any(isLawnPlan(item["sku"]) for item in parent_order["items"])
 
 
 def process_order(order, mlp_data):
@@ -147,9 +192,6 @@ def process_order(order, mlp_data):
     if order_split_required(order):
         # Prepare the child orders and parent order
         original_order, child_orders = prepare_split_data(order, need_stk_tag, mlp_data, need_gnome)
-
-        print(f"Child orders check 2: {child_orders}")
-        print(f"Parent order check 2: {original_order}")
 
         child_responses = []
         for index, child_order in enumerate(child_orders):
@@ -177,7 +219,7 @@ def process_order(order, mlp_data):
             order = apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=True)
         else:
             order = apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False)
-        order = set_stk_order_tag(order)
+        order = set_order_tags(order)
         response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
 
         if response.status_code == 200:
@@ -236,23 +278,20 @@ def prepare_split_data(order, need_stk_tag, mlp_data, need_gnome):
     original_order['items'] = [item for item in original_order['items'] if item['quantity'] > 0]
     original_order['orderNumber'] = f"{original_order['orderNumber']}-1"
     original_order['advancedOptions']['customField2'] = f"Shipment 1 of {total_shipments}"
+    original_order = set_order_tags(original_order)
 
     for i in range(len(child_orders)):
         child_order = copy.deepcopy(child_orders[i])
         child_order['orderNumber'] = f"{order['orderNumber']}-{i + 2}"
         child_order['advancedOptions']['customField2'] = f"Shipment {i + 2} of {total_shipments}"
-        if need_stk_tag:
-            child_order = set_stk_order_tag(child_order)
-            need_stk_tag = False
+        
+        child_order = set_order_tags(child_order)
         child_orders[i] = child_order
-
-    if need_stk_tag:
-        original_order = set_stk_order_tag(original_order)
-        need_stk_tag = False
 
     print(f"Parent order: {original_order}")
     print(f"Child_orders: {child_orders}")
     return original_order, child_orders
+
 
 
 def prepare_child_order(parent_order, child_order_items, mlp_data):
@@ -264,6 +303,8 @@ def prepare_child_order(parent_order, child_order_items, mlp_data):
     child_order['orderKey'] = str(uuid.uuid4())
 
     child_order = apply_preset_based_on_pouches(child_order, mlp_data)
+
+    child_order = set_order_tags(child_order, parent_order)
 
     child_order['advancedOptions']['billToParty'] = "my_other_account"
     parent_order['advancedOptions']['billToParty'] = "my_other_account"
