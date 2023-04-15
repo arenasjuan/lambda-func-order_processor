@@ -144,7 +144,12 @@ def set_order_tags(order, parent_order=None):
 def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     preset = {}
     total_pouches = 0
+<<<<<<< HEAD
     base_weights = {'1': 6, '2': 10, '3': 15}
+=======
+    special_items = {'OTP - HES': 0}
+    total_special_items = 0
+>>>>>>> 1b6887a71e85f01de8691868e1ca845554ba0ab0
 
     def process_and_update(item):
         nonlocal total_pouches
@@ -162,6 +167,7 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
 
     preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
 
+<<<<<<< HEAD
     if total_pouches == 0 and len(order['items']) == 1 and order['items'][0]['sku'] == 'OTP - HES':
         hes_quantity = str(order['items'][0]['quantity'])
         hes_weight = base_weights.get(hes_quantity, None)
@@ -170,6 +176,20 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
             preset['weight']['value'] = hes_weight
         else:
             preset = preset_dict['HES']
+=======
+    if total_pouches == 0:
+        if len(order['items']) == 1:
+            if order['items'][0]['sku'] == 'OTP - HES' and 'Sprayer' in order['items'][0]['name']:
+                preset = preset_dict['HES']
+            else:
+                preset_key = str(total_pouches)
+                if preset_key in preset_dict:
+                    preset = preset_dict[preset_key]
+        else:
+            preset_key = str(total_pouches)
+            if preset_key in preset_dict:
+                preset = preset_dict[preset_key]
+>>>>>>> 1b6887a71e85f01de8691868e1ca845554ba0ab0
     else:
         preset_key = str(total_pouches)
         if preset_key in preset_dict:
@@ -191,11 +211,17 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     return updated_order
 
 
-
 def submit_order(order):
     response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
     return order['orderNumber'], response
 
+<<<<<<< HEAD
+def submit_order(order):
+    response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
+    return order['orderNumber'], response
+
+=======
+>>>>>>> 1b6887a71e85f01de8691868e1ca845554ba0ab0
 def process_order(order, mlp_data, parent_has_gnome=False):
     need_stk_tag = any(item['sku'] == 'OTP - STK' for item in order['items'])
     need_gnome = should_add_gnome_to_parent_order(order) if not parent_has_gnome else False
