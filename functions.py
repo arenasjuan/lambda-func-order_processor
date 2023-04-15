@@ -144,17 +144,13 @@ def set_order_tags(order, parent_order=None):
 def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     preset = {}
     total_pouches = 0
-    special_items = {'OTP - HES': 0}
-    total_special_items = 0
+    base_weights = {'1': 6, '2': 10, '3': 15}
 
     def process_and_update(item):
-        nonlocal total_pouches, special_items, total_special_items
+        nonlocal total_pouches
         process_item(item, mlp_data)
 
-        if item['sku'] in special_items:
-            special_items[item['sku']] += item['quantity']
-            total_special_items += item['quantity']
-        else:
+        if item['sku'] != 'OTP - HES':
             total_pouches += item['quantity'] * config.sku_to_pouches.get(item['sku'], 0)
 
         return item
@@ -166,18 +162,14 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
 
     preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
 
-    if total_pouches == 0:
-        if len(order['items']) == 1:
-            if order['items'][0]['sku'] == 'OTP - HES' and 'Sprayer' in order['items'][0]['name']:
-                preset = preset_dict['HES']
-            else:
-                preset_key = str(total_pouches)
-                if preset_key in preset_dict:
-                    preset = preset_dict[preset_key]
+    if total_pouches == 0 and len(order['items']) == 1 and order['items'][0]['sku'] == 'OTP - HES':
+        hes_quantity = str(order['items'][0]['quantity'])
+        hes_weight = base_weights.get(hes_quantity, None)
+        if hes_weight is not None:
+            preset = preset_dict['HES'].copy()
+            preset['weight']['value'] = hes_weight
         else:
-            preset_key = str(total_pouches)
-            if preset_key in preset_dict:
-                preset = preset_dict[preset_key]
+            preset = preset_dict['HES']
     else:
         preset_key = str(total_pouches)
         if preset_key in preset_dict:
@@ -197,6 +189,7 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     updated_order['advancedOptions'] = updated_advanced_options
 
     return updated_order
+
 
 
 def submit_order(order):
