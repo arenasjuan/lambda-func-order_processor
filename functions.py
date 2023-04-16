@@ -58,7 +58,6 @@ def isLawnPlan(sku):
     return (sku.startswith('SUB') or sku in ['05000', '10000', '15000']) and sku not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]
 
 def process_item(item, mlp_data):
-    print("Processing individual item")
     original_sku = item["sku"]
     if original_sku in config.SKU_REPLACEMENTS:
         if isLawnPlan(original_sku) and original_sku in mlp_data:
@@ -85,60 +84,62 @@ def append_tag_if_not_exists(tag, custom_field):
     return custom_field
 
 def set_order_tags(order, parent_order=None):
-    if not order.get('advancedOptions'):
-        order['advancedOptions'] = {}
+    if 'customField1' in order['advancedOptions']:
+        del order['advancedOptions']['customField1']
+        order['advancedOptions']['customField1'] = ""        
 
-    if order['advancedOptions'].get('customField1') is None:
-        order['advancedOptions']['customField1'] = ""
+    print(f"Tags for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
 
     lawn_plan_skus = ["MLP", "TLP", "SFLP", "OLFP", "Organic"]
-    has_lawn_plan = any(any(substr in item['sku'] or substr in item['name'] for substr in lawn_plan_skus) for item in order['items'])
+    has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in lawn_plan_skus) for item in order['items'])
+    print(f"{order['orderNumber']}items: {order['items']}, has a lawn plan: {has_lawn_plan}")
 
-    if parent_order:
-        parent_has_lawn_plan = any(any(substr in item['sku'] or substr in item['name'] for substr in lawn_plan_skus) for item in parent_order['items'])
-        tags_to_preserve = ["Amazon"]
-        parent_tags = parent_order['advancedOptions'].get('customField1', '') or ''
-        
-        for tag in tags_to_preserve:
-            if tag in parent_tags:
-                order['advancedOptions']['customField1'] = append_tag_if_not_exists(tag, order['advancedOptions']['customField1'])
+    parent_has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in lawn_plan_skus) for item in parent_order['items'])
+    parent_tags = parent_order['advancedOptions'].get('customField1', '') or ''
+    
+    if 'Amazon' in parent_tags:
+        order['advancedOptions']['customField1'] = append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'])
+    print(f"Tags 2 for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
 
-        if "Subscription First Order" in parent_tags and parent_has_lawn_plan and has_lawn_plan:
+    if parent_has_lawn_plan and has_lawn_plan:
+        if "Subscription First Order" in parent_tags:
             order['advancedOptions']['customField1'] = append_tag_if_not_exists("Subscription First Order", order['advancedOptions']['customField1'])
+        elif "Recurring" in parent_tags:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Subscription Recurring", order['advancedOptions']['customField1'])
 
-        if "Recurring" in parent_tags and parent_has_lawn_plan and has_lawn_plan:
-            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Recurring", order['advancedOptions']['customField1'])
+    otp_order_counter = 0
+    for item in order['items']:
+        if item['sku'].startswith("OTP"):
+            otp_order_counter += 1
+            continue
 
-        otp_order_counter = 0
-        for item in order['items']:
-            if item['sku'].startswith("OTP"):
-                otp_order_counter += 1
-                continue
+        if 'TLP' in item['sku']:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Lone-Star", order['advancedOptions']['customField1'])
+            print(f"Tags 3 for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
+            continue
+        if 'SFLP' in item['sku']:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("South-Florida", order['advancedOptions']['customField1'])
+            print(f"Tags 4 for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
+            continue
+        if 'OLFP' in item['sku'] or 'Organic' in item['sku'] or 'Organic Lawn' in item['name']:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Organic", order['advancedOptions']['customField1'])
+            print(f"Tags 5for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
 
-            if 'TLP' in item['sku']:
-                order['advancedOptions']['customField1'] = append_tag_if_not_exists("Lone-Star", order['advancedOptions']['customField1'])
-                continue
-            if 'SFLP' in item['sku']:
-                order['advancedOptions']['customField1'] = append_tag_if_not_exists("South-Florida", order['advancedOptions']['customField1'])
-                continue
-            if 'OLFP' in item['sku'] or 'Organic' in item['sku'] or 'Organic Lawn' in item['name']:
-                order['advancedOptions']['customField1'] = append_tag_if_not_exists("Organic", order['advancedOptions']['customField1'])
+    if otp_order_counter == len(order['items']):
+        order['advancedOptions']['customField1'] = append_tag_if_not_exists("OTP-Only", order['advancedOptions']['customField1'])
 
-        if otp_order_counter == len(order['items']):
-            order['advancedOptions']['customField1'] = append_tag_if_not_exists("OTP-Only", order['advancedOptions']['customField1'])
+    
+    has_stk_item = any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items'])
+    has_stk_tag = "STK-Order" in order['advancedOptions']['customField1']
 
-    else:
-        has_stk_item = any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items'])
-        has_stk_tag = "STK-Order" in order['advancedOptions']['customField1']
+    if has_stk_item:
+        order['advancedOptions']['customField1'] = append_tag_if_not_exists("STK-Order", order['advancedOptions']['customField1'])
+    elif not has_stk_item and has_stk_tag:
+        tags = order['advancedOptions']['customField1'].split(', ')
+        tags.remove("STK-Order")
+        order['advancedOptions']['customField1'] = ', '.join(tags)
 
-        if has_stk_item:
-            order['advancedOptions']['customField1'] = append_tag_if_not_exists("STK-Order", order['advancedOptions']['customField1'])
-        elif not has_stk_item and has_stk_tag:
-            tags = order['advancedOptions']['customField1'].split(', ')
-            tags.remove("STK-Order")
-            order['advancedOptions']['customField1'] = ', '.join(tags)
-
-
+    print(f"Tags for {order['orderNumber']} after set_tags: {order['advancedOptions']['customField1']}")
     return order
 
 def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
@@ -155,10 +156,11 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
 
         return item
 
-    with ThreadPoolExecutor(max_workers=len(order['items'])) as executor:
+    with ThreadPoolExecutor() as executor:
         processed_items = list(executor.map(process_and_update, order['items']))
 
     order['items'] = processed_items
+    print(f"Processed items for {order['orderNumber']}): {processed_items}")
 
     preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
 
@@ -175,9 +177,15 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
         if preset_key in preset_dict:
             preset = preset_dict[preset_key]
 
+    print(f"Preset key for for {order['orderNumber']}): {preset_key}")
+
+    print(f"Presets: {preset}")
+
     updated_order = order.copy()
     for key, value in preset.items():
         updated_order[key] = value
+
+    print(f"Order with presets added: {updated_order}")
 
     if 'advancedOptions' in order and 'advancedOptions' in preset:
         updated_advanced_options = {**order['advancedOptions'], **preset['advancedOptions']}
@@ -188,21 +196,14 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
 
     updated_order['advancedOptions'] = updated_advanced_options
 
+    print(f"Final updated order: {updated_order}")
+
     return updated_order
 
-
-
 def submit_order(order):
     response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
-    return order['orderNumber'], response
+    return response
 
-<<<<<<< HEAD
-def submit_order(order):
-    response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
-    return order['orderNumber'], response
-
-=======
->>>>>>> 1b6887a71e85f01de8691868e1ca845554ba0ab0
 def process_order(order, mlp_data, parent_has_gnome=False):
     need_stk_tag = any(item['sku'] == 'OTP - STK' for item in order['items'])
     need_gnome = should_add_gnome_to_parent_order(order) if not parent_has_gnome else False
@@ -210,20 +211,26 @@ def process_order(order, mlp_data, parent_has_gnome=False):
     if order_split_required(order):
         # Prepare the child orders and parent order
         original_order, child_orders = prepare_split_data(order, need_stk_tag, mlp_data, need_gnome)
+        print(f"Check before processing — parent: {original_order}")
+        print(f"Check before processing — children: {child_orders}")
 
         # Execute POST requests for child and parent orders in parallel
-        orders_to_process = child_orders + [original_order]
-        with ThreadPoolExecutor(max_workers=len(orders_to_process)) as executor:
-            futures = {executor.submit(submit_order, order): order for order in orders_to_process}
-            for future in as_completed(futures):
-                order_number, response = future.result()
-                if response.status_code == 200:
-                    print(f"Order #{order_number} created successfully")
-                    print(f"Full success response: {response.__dict__}")
-                else:
-                    failed.append(order_number)
-                    print(f"Unexpected status code for order #{order_number}: {response.status_code}")
-                    print(f"Full error response: {response.__dict__}")
+        orders_to_process = [original_order] + child_orders
+        with ThreadPoolExecutor() as executor:
+            responses = list(executor.map(submit_order, orders_to_process))
+
+        # Check responses for successful order creation
+        for i, response in enumerate(responses):
+            order_processed = orders_to_process[i]['orderNumber']
+            if response.status_code == 200:
+                print(f"Order #{order_processed} created successfully")
+                print(f"Full success response: {response.__dict__}")
+            else:
+                failed.append(order_processed)
+                print(f"Unexpected status code for order #{order_processed}: {response.status_code}")
+                print(f"Full error response: {response.__dict__}")
+
+        return f"Successfully processed order #{order['orderNumber']}"
 
     else:
         if need_gnome:
@@ -232,7 +239,6 @@ def process_order(order, mlp_data, parent_has_gnome=False):
             order = apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=True)
         else:
             order = apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False)
-        order = set_order_tags(order)
         response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
 
         if response.status_code == 200:
@@ -245,67 +251,87 @@ def process_order(order, mlp_data, parent_has_gnome=False):
 
         return f"Successfully processed order #{order['orderNumber']} without splitting"
 
-
 def first_fit_decreasing(items, max_pouches_per_bin=9):
-    items = sorted(items, reverse=True)
+    otp_lyl_present = any(item[0] == 'OTP - LYL' for item in items)
+    if otp_lyl_present:
+        items = [(sku, count) for sku, count in items if sku != 'OTP - LYL']
+
+    items = sorted(items, key=lambda x: x[1], reverse=True)
     bins = []
-    pouches = []
-    with ThreadPoolExecutor() as executor:
-        futures = {executor.submit(find_suitable_bin, item, bins, pouches, max_pouches_per_bin): item for item in items}
-        for future in as_completed(futures):
-            item = futures[future]
-            try:
-                i, item = future.result()
-                if i is not None:
-                    bins[i] += item
-                    pouches[i] += 1
-                else:
-                    bins.append(item)
-                    pouches.append(1)
-            except Exception as e:
-                print(f"Error occurred while processing item {item}: {e}")
+
+    for item in items:
+        remaining_pouches = item[1]
+        while remaining_pouches > 0:
+            found_bin = False
+            for bin in bins:
+                # Check if the current bin is the first bin and if OTP - LYL is present in the order.
+                is_first_bin = bins.index(bin) == 0
+                max_pouches = max_pouches_per_bin - (1 if otp_lyl_present and is_first_bin else 0)
+
+                available_space = max_pouches - sum([count for _, count in bin])
+                pouches_to_add = min(available_space, remaining_pouches)
+                if pouches_to_add > 0:
+                    # Update the existing SKU count in the bin, if present
+                    existing_item = next((bin_item for bin_item in bin if bin_item[0] == item[0]), None)
+                    if existing_item:
+                        index = bin.index(existing_item)
+                        bin[index] = (item[0], existing_item[1] + pouches_to_add)
+                    else:
+                        bin.append((item[0], pouches_to_add))
+
+                    remaining_pouches -= pouches_to_add
+                    found_bin = True
+                    break
+
+            if not found_bin:
+                pouches_to_add = min(max_pouches_per_bin, remaining_pouches)
+                bins.append([(item[0], pouches_to_add)])
+                remaining_pouches -= pouches_to_add
+
+    if otp_lyl_present:
+        # Add OTP - LYL back into the first bin (parent order) with hardcoded pouch count of 1
+        bins[0].append(('OTP - LYL', 1))
+
     return bins
 
-def find_suitable_bin(item, bins, pouches, max_pouches_per_bin):
-    for i, bin in enumerate(bins):
-        if pouches[i] < max_pouches_per_bin:
-            return i, item
-    return None, item
+
 
 
 def prepare_split_data(order, need_stk_tag, mlp_data, need_gnome):
+    print(f"Check original order: {order}")
     original_order = copy.deepcopy(order)  # Create a deep copy of the order object
     child_orders = []
-    
-    # Prepare the list of items with their corresponding pouch count
-    items_with_pouch_count = []
-    for item in original_order['items']:
-        pouch_count = config.sku_to_pouches.get(item['sku'], 0)
-        items_with_pouch_count.extend([pouch_count] * item['quantity'])
 
-    # Apply the FFD algorithm
+    items_with_pouch_count = [(item['sku'], config.sku_to_pouches.get(item['sku'], 0)) for item in original_order['items'] for _ in range(item['quantity'])]
+
     bins = first_fit_decreasing(items_with_pouch_count)
 
-    # Iterate through the bins returned
-    for bin in bins:
-        child_order_items = []
+    print(f"Final bins: {bins}")
 
-        for pouch_count in bin:
-            for item in original_order['items']:
-                item_pouch_count = config.sku_to_pouches.get(item['sku'], 0)
-                if item['quantity'] > 0 and item_pouch_count == pouch_count:
-                    item_copy = copy.deepcopy(item)
-                    item_copy['quantity'] = 1
-                    child_order_items.append(item_copy)
-                    item['quantity'] -= 1
-                    break
+    stk_item = next((item for item in original_order['items'] if item['sku'] == 'OTP - STK'), None)
 
-        child_order = prepare_child_order(original_order, child_order_items, mlp_data)
-        child_orders.append(child_order)
+    if stk_item:
+        bins[0].append(('OTP - STK', 1))
 
-    total_shipments = len(child_orders)
+    parent_items = bins[0]
+    print(f"Parent items: {parent_items}")
 
-    remaining_pouches_total = sum([item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in original_order['items']])
+    total_shipments = len(bins)
+
+    original_order_items = []
+    for item in original_order['items']:
+        if item['sku'] == 'OTP - STK':
+            original_order_items.append(item)
+            continue
+
+        parent_item = next((x for x in parent_items if x[0] == item['sku']), None)
+        if parent_item:
+            item_copy = copy.deepcopy(item)
+            item_copy['quantity'] = parent_item[1] // config.sku_to_pouches.get(item['sku'], 1)
+            original_order_items.append(item_copy)
+
+    original_order['items'] = original_order_items
+    original_order = set_order_tags(original_order, order)
 
     if need_gnome:
         gnome = config.gnome
@@ -314,38 +340,58 @@ def prepare_split_data(order, need_stk_tag, mlp_data, need_gnome):
     else:
         original_order = apply_preset_based_on_pouches(original_order, mlp_data)
 
-    original_order['items'] = [item for item in original_order['items'] if item['quantity'] > 0]
+    with ThreadPoolExecutor(max_workers=len(bins) - 1) as executor:
+        args_list = [(bin_index, bin, order, mlp_data, total_shipments) for bin_index, bin in enumerate(bins[1:])]
+        child_orders = []
+        for result in executor.map(prepare_child_order, args_list):
+            child_orders.append(result)
+
+    print(f"Parent items: {original_order_items}")
     original_order['orderNumber'] = f"{original_order['orderNumber']}-1"
     original_order['advancedOptions']['customField2'] = f"Shipment 1 of {total_shipments}"
-    original_order = set_order_tags(original_order)
-
-    for i in range(len(child_orders)):
-        child_order = copy.deepcopy(child_orders[i])
-        child_order['orderNumber'] = f"{order['orderNumber']}-{i + 2}"
-        child_order['advancedOptions']['customField2'] = f"Shipment {i + 2} of {total_shipments}"
-        
-        child_order = set_order_tags(child_order)
-        child_orders[i] = child_order
+    original_order['advancedOptions']['billToParty'] = "my_other_account"
 
     print(f"Parent order: {original_order}")
     print(f"Child_orders: {child_orders}")
+    for child in child_orders:
+        print(f"Final tags for {child['orderNumber']}: {child['advancedOptions']['customField1']}")
     return original_order, child_orders
 
 
 
-def prepare_child_order(parent_order, child_order_items, mlp_data):
+
+def prepare_child_order(args):
+    print("Preparing child order with args:", args)
+    bin_index, bin, parent_order, mlp_data, total_shipments = args
+
     child_order = copy.deepcopy(parent_order)
     if 'orderId' in child_order:
         del child_order['orderId']
+    child_order['orderNumber'] = f"{parent_order['orderNumber']}-{bin_index+2}"
+    child_order['advancedOptions']['customField2'] = f"Shipment {bin_index+2} of {total_shipments}"
+    print(f"Bin for {child_order['orderNumber']}: {bin}")
+
+    print(f"Check {child_order['orderNumber']}, parent items = {parent_order['items']}")
+    
+    child_order_items = []
+    for sku, pouch_count in bin:
+        item = next((i for i in parent_order['items'] if i['sku'] == sku), None)
+        if item is not None:
+            item_copy = copy.deepcopy(item)
+            item_copy['quantity'] = pouch_count // config.sku_to_pouches.get(item['sku'], 1)
+            if item_copy['quantity'] > 0:
+                child_order_items.append(item_copy)
+        else:
+            continue
     child_order['items'] = child_order_items
     child_order['orderTotal'] = 0.00
     child_order['orderKey'] = str(uuid.uuid4())
+    child_order['advancedOptions']['billToParty'] = "my_other_account"
 
+    print(f"Child order before applying presets (bin_index: {bin_index}): {child_order}")
     child_order = apply_preset_based_on_pouches(child_order, mlp_data)
 
     child_order = set_order_tags(child_order, parent_order)
 
-    child_order['advancedOptions']['billToParty'] = "my_other_account"
-    parent_order['advancedOptions']['billToParty'] = "my_other_account"
-
+    print(f"Child order {bin_index+1}: {child_order}")
     return child_order
