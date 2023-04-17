@@ -179,7 +179,7 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     else:
         updated_advanced_options = preset['advancedOptions']
 
-    updated_order['advancedOptions'] = updated_advanced_optionsf
+    updated_order['advancedOptions'] = updated_advanced_options
 
     return updated_order
 
@@ -326,7 +326,6 @@ def prepare_split_data(order, need_stk_tag, mlp_data, need_gnome):
 
     print(f"Parent order for {order['orderNumber']}: {original_order}")
     print(f"Child_orders for {order['orderNumber']}: {child_orders}")
-    for child in child_orders:
     return original_order, child_orders
 
 def prepare_child_order(args):
