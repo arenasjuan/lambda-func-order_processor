@@ -32,7 +32,6 @@ def processor(order):
         url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
         response_mlp = session.get(url_mlp)
         data_mlp = response_mlp.json()
-        print(data_mlp) 
         plan_details = data_mlp.get("plan_details", [])
         for detail in plan_details:
             product_list = []
@@ -88,18 +87,15 @@ def set_order_tags(order, parent_order=None):
         del order['advancedOptions']['customField1']
         order['advancedOptions']['customField1'] = ""        
 
-    print(f"Tags for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
 
     lawn_plan_skus = ["MLP", "TLP", "SFLP", "OLFP", "Organic"]
     has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in lawn_plan_skus) for item in order['items'])
-    print(f"{order['orderNumber']}items: {order['items']}, has a lawn plan: {has_lawn_plan}")
 
     parent_has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in lawn_plan_skus) for item in parent_order['items'])
     parent_tags = parent_order['advancedOptions'].get('customField1', '') or ''
     
     if 'Amazon' in parent_tags:
         order['advancedOptions']['customField1'] = append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'])
-    print(f"Tags 2 for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
 
     if parent_has_lawn_plan and has_lawn_plan:
         if "Subscription First Order" in parent_tags:
@@ -115,15 +111,12 @@ def set_order_tags(order, parent_order=None):
 
         if 'TLP' in item['sku']:
             order['advancedOptions']['customField1'] = append_tag_if_not_exists("Lone-Star", order['advancedOptions']['customField1'])
-            print(f"Tags 3 for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
             continue
         if 'SFLP' in item['sku']:
             order['advancedOptions']['customField1'] = append_tag_if_not_exists("South-Florida", order['advancedOptions']['customField1'])
-            print(f"Tags 4 for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
             continue
         if 'OLFP' in item['sku'] or 'Organic' in item['sku'] or 'Organic Lawn' in item['name']:
             order['advancedOptions']['customField1'] = append_tag_if_not_exists("Organic", order['advancedOptions']['customField1'])
-            print(f"Tags 5for {order['orderNumber']}: {order['advancedOptions']['customField1']}")
 
     if otp_order_counter == len(order['items']):
         order['advancedOptions']['customField1'] = append_tag_if_not_exists("OTP-Only", order['advancedOptions']['customField1'])
@@ -139,7 +132,6 @@ def set_order_tags(order, parent_order=None):
         tags.remove("STK-Order")
         order['advancedOptions']['customField1'] = ', '.join(tags)
 
-    print(f"Tags for {order['orderNumber']} after set_tags: {order['advancedOptions']['customField1']}")
     return order
 
 def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
@@ -160,7 +152,6 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
         processed_items = list(executor.map(process_and_update, order['items']))
 
     order['items'] = processed_items
-    print(f"Processed items for {order['orderNumber']}): {processed_items}")
 
     preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
 
@@ -177,15 +168,9 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
         if preset_key in preset_dict:
             preset = preset_dict[preset_key]
 
-    print(f"Preset key for for {order['orderNumber']}): {preset_key}")
-
-    print(f"Presets: {preset}")
-
     updated_order = order.copy()
     for key, value in preset.items():
         updated_order[key] = value
-
-    print(f"Order with presets added: {updated_order}")
 
     if 'advancedOptions' in order and 'advancedOptions' in preset:
         updated_advanced_options = {**order['advancedOptions'], **preset['advancedOptions']}
@@ -194,9 +179,7 @@ def apply_preset_based_on_pouches(order, mlp_data, use_gnome_preset=False):
     else:
         updated_advanced_options = preset['advancedOptions']
 
-    updated_order['advancedOptions'] = updated_advanced_options
-
-    print(f"Final updated order: {updated_order}")
+    updated_order['advancedOptions'] = updated_advanced_optionsf
 
     return updated_order
 
@@ -211,8 +194,6 @@ def process_order(order, mlp_data, parent_has_gnome=False):
     if order_split_required(order):
         # Prepare the child orders and parent order
         original_order, child_orders = prepare_split_data(order, need_stk_tag, mlp_data, need_gnome)
-        print(f"Check before processing — parent: {original_order}")
-        print(f"Check before processing — children: {child_orders}")
 
         # Execute POST requests for child and parent orders in parallel
         orders_to_process = [original_order] + child_orders
@@ -294,11 +275,7 @@ def first_fit_decreasing(items, max_pouches_per_bin=9):
 
     return bins
 
-
-
-
 def prepare_split_data(order, need_stk_tag, mlp_data, need_gnome):
-    print(f"Check original order: {order}")
     original_order = copy.deepcopy(order)  # Create a deep copy of the order object
     child_orders = []
 
@@ -306,15 +283,12 @@ def prepare_split_data(order, need_stk_tag, mlp_data, need_gnome):
 
     bins = first_fit_decreasing(items_with_pouch_count)
 
-    print(f"Final bins: {bins}")
-
     stk_item = next((item for item in original_order['items'] if item['sku'] == 'OTP - STK'), None)
 
     if stk_item:
         bins[0].append(('OTP - STK', 1))
 
     parent_items = bins[0]
-    print(f"Parent items: {parent_items}")
 
     total_shipments = len(bins)
 
@@ -346,22 +320,16 @@ def prepare_split_data(order, need_stk_tag, mlp_data, need_gnome):
         for result in executor.map(prepare_child_order, args_list):
             child_orders.append(result)
 
-    print(f"Parent items: {original_order_items}")
     original_order['orderNumber'] = f"{original_order['orderNumber']}-1"
     original_order['advancedOptions']['customField2'] = f"Shipment 1 of {total_shipments}"
     original_order['advancedOptions']['billToParty'] = "my_other_account"
 
-    print(f"Parent order: {original_order}")
-    print(f"Child_orders: {child_orders}")
+    print(f"Parent order for {order['orderNumber']}: {original_order}")
+    print(f"Child_orders for {order['orderNumber']}: {child_orders}")
     for child in child_orders:
-        print(f"Final tags for {child['orderNumber']}: {child['advancedOptions']['customField1']}")
     return original_order, child_orders
 
-
-
-
 def prepare_child_order(args):
-    print("Preparing child order with args:", args)
     bin_index, bin, parent_order, mlp_data, total_shipments = args
 
     child_order = copy.deepcopy(parent_order)
@@ -369,9 +337,6 @@ def prepare_child_order(args):
         del child_order['orderId']
     child_order['orderNumber'] = f"{parent_order['orderNumber']}-{bin_index+2}"
     child_order['advancedOptions']['customField2'] = f"Shipment {bin_index+2} of {total_shipments}"
-    print(f"Bin for {child_order['orderNumber']}: {bin}")
-
-    print(f"Check {child_order['orderNumber']}, parent items = {parent_order['items']}")
     
     child_order_items = []
     for sku, pouch_count in bin:
@@ -388,10 +353,8 @@ def prepare_child_order(args):
     child_order['orderKey'] = str(uuid.uuid4())
     child_order['advancedOptions']['billToParty'] = "my_other_account"
 
-    print(f"Child order before applying presets (bin_index: {bin_index}): {child_order}")
     child_order = apply_preset_based_on_pouches(child_order, mlp_data)
 
     child_order = set_order_tags(child_order, parent_order)
 
-    print(f"Child order {bin_index+1}: {child_order}")
     return child_order
