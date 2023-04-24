@@ -23,20 +23,7 @@ failed = []
 
 def processor(order):
     order_number = order['orderNumber']
-    
-    '''
-    if "-" in order_number:
-        if order.get('serviceCode') is None:
-            order['serviceCode'] = 'ups_ground'
-            response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
-            if response.status_code == 200:
-                print(f"Successfully updated service code for #{order_number}")
-                print(f"Full success response: {response.__dict__}")
-            else:
-                print(f"Failed to update service code for order #{order_number}: {response.status_code}")
-                print(f"Full error response: {response.__dict__}")
-        return
-    '''
+
     mlp_data = {}
 
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
