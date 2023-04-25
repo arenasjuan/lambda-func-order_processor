@@ -24,26 +24,29 @@ failed = []
 
 def processor(order):
     order_number = order['orderNumber']
-    
     mlp_data = {}
-
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
     if has_lawn_plan:
-        print(f"Order {order_number} has a lawn plan")
+        order_number = order['orderNumber']
         if "-" in order_number:
             order_number = order['orderNumber'].split("-")[0]
         url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
         response_mlp = session.get(url_mlp)
         data_mlp = response_mlp.json()
         plan_details = data_mlp.get("plan_details", [])
-        for detail in plan_details:
-            product_list = []
-            for product in detail['products']:
-                product_list.append({
-                    'name': product['name'],
-                    'count': product['count']
-                })
-            mlp_data[detail['sku']] = product_list
+
+        for order_item in order['items']:
+            if isLawnPlan(order_item['sku']):
+                for detail in plan_details:
+                    if detail['sku'] == order_item['sku']:
+                        product_list = []
+                        for product in detail['products']:
+                            product_list.append({
+                                'name': product['name'],
+                                'count': product['count']
+                            })
+                        mlp_data[detail['sku']] = product_list
+                        break
 
     process_order(order, mlp_data)
 
@@ -63,11 +66,13 @@ def isLawnPlan(sku):
 def process_item(item, mlp_data):
     original_sku = item["sku"]
     if original_sku in config.SKU_REPLACEMENTS:
-        if isLawnPlan(original_sku) and original_sku in mlp_data:
-            products_info = mlp_data[original_sku]
-            item['name'] = config.SKU_REPLACEMENTS[original_sku]
-            for product_info in products_info:
-                item['name'] += f"\n\u00A0\u00A0\u00A0\u00A0• {product_info['count']} {product_info['name']}"
+        if isLawnPlan(original_sku):
+            for sku, products_info in mlp_data.items():
+                if sku == original_sku:
+                    item['name'] = config.SKU_REPLACEMENTS[original_sku]
+                    for product_info in products_info:
+                        item['name'] += f"\n\u00A0\u00A0\u00A0\u00A0• {product_info['count']} {product_info['name']}"
+                    break
         else:
             replacement_name = config.SKU_REPLACEMENTS[original_sku]
             item["name"] = replacement_name
@@ -262,11 +267,11 @@ def prepare_split_data(order, mlp_data, need_gnome):
     original_order = copy.deepcopy(order)
     child_orders = []
 
-    items_with_pouch_count = [
+    items_with_quantity = [
         (item['sku'], item['quantity'])
         for item in original_order['items'] if item['sku']
     ]
-    bins = first_fit_decreasing(items_with_pouch_count)
+    bins = first_fit_decreasing(items_with_quantity)
 
     stk_item = next(
         (item for item in original_order['items'] if item['sku'] == 'OTP - STK'), None
