@@ -7,6 +7,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import time
+from typing import List, Tuple
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -23,7 +24,7 @@ failed = []
 
 def processor(order):
     order_number = order['orderNumber']
-
+    
     mlp_data = {}
 
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
@@ -263,7 +264,7 @@ def prepare_split_data(order, mlp_data, need_gnome):
 
     items_with_pouch_count = [
         (item['sku'], item['quantity'])
-        for item in original_order['items']
+        for item in original_order['items'] if item['sku']
     ]
     bins = first_fit_decreasing(items_with_pouch_count)
 
@@ -279,6 +280,8 @@ def prepare_split_data(order, mlp_data, need_gnome):
     original_order_items = []
 
     for item in original_order['items']:
+        if not item['sku']:  # Add this condition
+            continue
         if item['sku'] == 'OTP - STK':
             original_order_items.append(item)
             continue
