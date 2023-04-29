@@ -24,12 +24,24 @@ failed = []
 
 def processor(order):
     order_number = order['orderNumber']
+
+    processed = "-" in order_number
+
+    if processed:
+        if order.get('serviceCode') is None:
+            order['serviceCode'] = 'ups_ground'
+            response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
+            if response.status_code == 200:
+                print(f"Successfully updated service code for #{order_number}")
+                print(f"Full success response: {response.__dict__}")
+            else:
+                print(f"Failed to update service code for order #{order_number}: {response.status_code}")
+                print(f"Full error response: {response.__dict__}")
+        return
+
     mlp_data = {}
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
     if has_lawn_plan:
-        order_number = order['orderNumber']
-        if "-" in order_number:
-            order_number = order['orderNumber'].split("-")[0]
         url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
         response_mlp = session.get(url_mlp)
         data_mlp = response_mlp.json()
@@ -92,28 +104,35 @@ def append_tag_if_not_exists(tag, custom_field):
     return custom_field
 
 def set_order_tags(order, parent_order, total_pouches):
+    '''
     if 'customField1' in order['advancedOptions']:
         del order['advancedOptions']['customField1']
         order['advancedOptions']['customField1'] = ""
+    '''
 
-    lawn_plan_skus = ["MLP", "TLP", "SFLP", "OLFP", "Organic"]
+    if order.get('tagIds') is not None:
+        print(f"Tag check: {order['tagIds']}")
+        if 64097 in order['tagIds']:
+            order['tagIds'] = [64097]
+        else:
+            order['tagIds'] = []
+    else:
+        order['tagIds'] = []
+
+    lawn_plan_skus = ["MLP", "TLP", "SFLP", "OLFP", "Organic", "SELP", "GSLP"]
     has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in lawn_plan_skus) for item in order['items'])
 
     parent_has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in lawn_plan_skus) for item in parent_order['items'])
     parent_tags = parent_order['advancedOptions'].get('customField1', '') or '' 
     
     if 'Amazon' in parent_tags:
-        order['advancedOptions']['customField1'] = append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'])
-    if 'Gnome-UPS' in parent_tags:
-        order['advancedOptions']['customField1'] = append_tag_if_not_exists('Gnome-UPS', order['advancedOptions']['customField1'])
-    if 'Normal-UPS' in parent_tags:
-        order['advancedOptions']['customField1'] = append_tag_if_not_exists('Normal-UPS', order['advancedOptions']['customField1'])
+        order['tagIds'].append(63002)
 
     if parent_has_lawn_plan and has_lawn_plan:
         if "Subscription First Order" in parent_tags:
-            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Subscription First Order", order['advancedOptions']['customField1'])
+            order['tagIds'].append(62743)
         elif "Recurring" in parent_tags:
-            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Subscription Recurring", order['advancedOptions']['customField1'])
+            order['tagIds'].append(62744)
 
     otp_order_counter = 0
     for item in order['items']:
@@ -122,19 +141,19 @@ def set_order_tags(order, parent_order, total_pouches):
             continue
 
         if 'TLP' in item['sku']:
-            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Lone-Star", order['advancedOptions']['customField1'])
+            order['tagIds'].append(59793)
             continue
         if 'SFLP' in item['sku']:
-            order['advancedOptions']['customField1'] = append_tag_if_not_exists("South-Florida", order['advancedOptions']['customField1'])
+            order['tagIds'].append(59794)
             continue
         if 'OLFP' in item['sku'] or 'Organic' in item['sku'] or 'Organic Lawn' in item['name']:
-            order['advancedOptions']['customField1'] = append_tag_if_not_exists("Organic", order['advancedOptions']['customField1'])
+            order['tagIds'].append( 62745)
 
     if otp_order_counter == len(order['items']):
-        order['advancedOptions']['customField1'] = append_tag_if_not_exists("OTP-Only", order['advancedOptions']['customField1'])
+        order['tagIds'].append(59254)
 
     if 0 < total_pouches <= 9:
-        order['advancedOptions']['customField1'] = append_tag_if_not_exists(f"{total_pouches}-Pouch", order['advancedOptions']['customField1'])
+        order['tagIds'].append(config.pouch_tags[total_pouches])
 
     return order
 
@@ -156,9 +175,6 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, use_gnome_pres
     for key, value in preset.items():
         updated_order[key] = value
 
-    if order.get('serviceCode') is None:
-        updated_order['serviceCode'] = 'ups_ground'
-
     if 'advancedOptions' in order and 'advancedOptions' in preset:
         updated_advanced_options = {**order['advancedOptions'], **preset['advancedOptions']}
     elif 'advancedOptions' in order:
@@ -179,6 +195,7 @@ def total_pouches(order):
     return sum(item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in order['items'])
 
 def process_order(order, mlp_data, parent_has_gnome=False):
+
     need_gnome = should_add_gnome_to_parent_order(order) if not parent_has_gnome else False
 
     if order_split_required(order):
@@ -213,17 +230,16 @@ def process_order(order, mlp_data, parent_has_gnome=False):
             order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches)
         copied_order = copy.deepcopy(order)
         order = set_order_tags(order, copied_order, parent_pouches)
-        response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
+        response = submit_order(order)
 
         if response.status_code == 200:
-            print(f"Order #{order['orderNumber']} updated successfully with preset")
+            print(f"Order #{order['orderNumber']} updated successfully without splitting")
             print(f"Full success response: {response.__dict__}")
         else:
             failed.append(order['orderNumber'])
             print(f"Unexpected status code for order #{order['orderNumber']}: {response.status_code}")
             print(f"Full error response: {response.__dict__}")
-
-        return f"Successfully processed order #{order['orderNumber']} without splitting"
+        return
 
 def first_fit_decreasing(items, max_pouches_per_bin=9):
     otp_lyl_present = any(item[0] == 'OTP - LYL' for item in items)
@@ -361,5 +377,7 @@ def prepare_child_order(args):
     child_order = apply_preset_based_on_pouches(child_order, mlp_data, child_pouches)
 
     child_order = set_order_tags(child_order, parent_order, child_pouches)
+
+    processed_children.append(child_order['orderNumber'])
 
     return child_order
