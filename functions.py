@@ -5,6 +5,7 @@ import copy
 import uuid
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import json
 import time
 from typing import List, Tuple
@@ -20,24 +21,11 @@ headers = {
 session = requests.Session()
 session.headers.update(headers)
 
+
 failed = []
 
 def processor(order):
     order_number = order['orderNumber']
-
-    processed = "-" in order_number
-
-    if processed:
-        if order.get('serviceCode') is None:
-            order['serviceCode'] = 'ups_ground'
-            response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
-            if response.status_code == 200:
-                print(f"Successfully updated service code for #{order_number}")
-                print(f"Full success response: {response.__dict__}")
-            else:
-                print(f"Failed to update service code for order #{order_number}: {response.status_code}")
-                print(f"Full error response: {response.__dict__}")
-        return
 
     mlp_data = {}
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
@@ -98,18 +86,8 @@ def should_add_gnome_to_parent_order(parent_order):
     custom_field1 = parent_order['advancedOptions'].get('customField1', "")
     return isinstance(custom_field1, str) and "First" in custom_field1 and any(isLawnPlan(item["sku"]) for item in parent_order["items"])
 
-def append_tag_if_not_exists(tag, custom_field):
-    if tag not in custom_field:
-        custom_field += (", " if custom_field else "") + tag
-    return custom_field
 
 def set_order_tags(order, parent_order, total_pouches):
-    '''
-    if 'customField1' in order['advancedOptions']:
-        del order['advancedOptions']['customField1']
-        order['advancedOptions']['customField1'] = ""
-    '''
-
     if order.get('tagIds') is not None:
         print(f"Tag check: {order['tagIds']}")
         if 64097 in order['tagIds']:
@@ -127,9 +105,11 @@ def set_order_tags(order, parent_order, total_pouches):
     
     if 'Amazon' in parent_tags:
         order['tagIds'].append(63002)
+        if not order['advancedOptions'].get('customField1'):
+            order['advancedOptions']['customField1'] = 'Amazon'
 
     if parent_has_lawn_plan and has_lawn_plan:
-        if "Subscription First Order" in parent_tags:
+        if "First" in parent_tags:
             order['tagIds'].append(62743)
         elif "Recurring" in parent_tags:
             order['tagIds'].append(62744)
@@ -195,7 +175,6 @@ def total_pouches(order):
     return sum(item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in order['items'])
 
 def process_order(order, mlp_data, parent_has_gnome=False):
-
     need_gnome = should_add_gnome_to_parent_order(order) if not parent_has_gnome else False
 
     if order_split_required(order):
@@ -357,6 +336,7 @@ def prepare_child_order(args):
         del child_order['orderId']
     child_order['tagIds'] = []
     child_order['orderNumber'] = f"{parent_order['orderNumber']}-{bin_index+2}"
+    child_order['advancedOptions']['customField1'] = ''
     child_order['advancedOptions']['customField2'] = f"Shipment {bin_index+2} of {total_shipments}"
     
     child_order_items = []
@@ -377,7 +357,5 @@ def prepare_child_order(args):
     child_order = apply_preset_based_on_pouches(child_order, mlp_data, child_pouches)
 
     child_order = set_order_tags(child_order, parent_order, child_pouches)
-
-    processed_children.append(child_order['orderNumber'])
 
     return child_order
