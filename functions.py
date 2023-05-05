@@ -15,7 +15,8 @@ encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-
 
 headers = {
     "Content-Type": "application/json",
-    "Authorization": f"Basic {encoded_auth_string}"
+    "Authorization": f"Basic {encoded_auth_string}",
+    "X-Partner": config.x_partner
 }
 
 session = requests.Session()
@@ -144,7 +145,7 @@ def set_order_tags(order, parent_order, total_pouches):
 def apply_preset_based_on_pouches(order, mlp_data, total_pouches, use_gnome_preset=False):
     preset = {}
 
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=len(order['items'])) as executor:
         processed_items = list(executor.map(lambda item: process_item(item, mlp_data), order['items']))
 
     order['items'] = processed_items
@@ -187,21 +188,21 @@ def process_order(order, mlp_data, parent_has_gnome=False):
 
         # Execute POST requests for child and parent orders in parallel
         orders_to_process = [original_order] + child_orders
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=len(orders_to_process)) as executor:
             responses = list(executor.map(submit_order, orders_to_process))
 
         # Check responses for successful order creation
         for i, response in enumerate(responses):
             order_processed = orders_to_process[i]['orderNumber']
             if response.status_code == 200:
-                print(f"Order #{order_processed} created successfully")
-                print(f"Full success response: {response.__dict__}")
+                print(f"(Log for #{order_processed}) Order #{order_processed} created successfully", flush=True)
+                print(f"(Log for #{order_processed}) Full success response: {response.__dict__}", flush=True)
             else:
                 failed.append(order_processed)
-                print(f"Unexpected status code for order #{order_processed}: {response.status_code}")
-                print(f"Full error response: {response.__dict__}")
-
-        return f"Successfully processed order #{order['orderNumber']}"
+                print(f"(Log for #{order_processed}) Unexpected status code for order #{order_processed}: {response.status_code}", flush=True)
+                print(f"(Log for #{order_processed}) Full error response: {response.__dict__}", flush=True)
+        print(f"(Log for #{order['orderNumber']}) Successfully split and processed order #{order['orderNumber']}", flush=True)
+        return
 
     else:
         parent_pouches = total_pouches(order)
@@ -216,12 +217,12 @@ def process_order(order, mlp_data, parent_has_gnome=False):
         response = submit_order(order)
 
         if response.status_code == 200:
-            print(f"Order #{order['orderNumber']} updated successfully without splitting")
-            print(f"Full success response: {response.__dict__}")
+            print(f"(Log for #{order['orderNumber']}) Successfully processed order #{order['orderNumber']} without splitting", flush=True)
+            print(f"(Log for #{order['orderNumber']}) Full success response: {response.__dict__}", flush=True)
         else:
             failed.append(order['orderNumber'])
-            print(f"Unexpected status code for order #{order['orderNumber']}: {response.status_code}")
-            print(f"Full error response: {response.__dict__}")
+            print(f"(Log for #{order['orderNumber']}) Unexpected status code for order #{order['orderNumber']}: {response.status_code}", flush=True)
+            print(f"(Log for #{order['orderNumber']}) Full error response: {response.__dict__}", flush=True)
         return
 
 def first_fit_decreasing(items, max_pouches_per_bin=9):
@@ -327,8 +328,8 @@ def prepare_split_data(order, mlp_data, need_gnome):
     original_order['orderNumber'] = f"{original_order['orderNumber']}-1"
     original_order['advancedOptions']['customField2'] = f"Shipment 1 of {total_shipments}"
 
-    print(f"Parent order for {order['orderNumber']}: {original_order}")
-    print(f"Child_orders for {order['orderNumber']}: {child_orders}")
+    print(f"(Log for #{order['orderNumber']}) Parent order for {order['orderNumber']}: {original_order}", flush=True)
+    print(f"(Log for #{order['orderNumber']}) Child_orders for {order['orderNumber']}: {child_orders}", flush=True)
 
     return original_order, child_orders
 
