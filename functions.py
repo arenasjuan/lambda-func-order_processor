@@ -89,7 +89,6 @@ def should_add_gnome_to_parent_order(parent_order):
 
 def set_order_tags(order, parent_order, total_pouches):
     if order.get('tagIds') is not None:
-        print(f"Tag check: {order['tagIds']}")
         if 64097 in order['tagIds']:
             order['tagIds'] = [64097]
         else:
@@ -111,12 +110,17 @@ def set_order_tags(order, parent_order, total_pouches):
     if parent_has_lawn_plan and has_lawn_plan:
         if "First" in parent_tags:
             order['tagIds'].append(62743)
-        elif "Recurring" in parent_tags:
+        elif "Recurring" or "Prepaid" in parent_tags:
             order['tagIds'].append(62744)
 
     otp_order_counter = 0
     for item in order['items']:
+
+        # Checks for OTPs
         if item['sku'].startswith("OTP"):
+            otp_order_counter += 1
+            continue
+        if 63002 in order['tagIds'] and item['sku'] in config.amazon_otp_skus:
             otp_order_counter += 1
             continue
 

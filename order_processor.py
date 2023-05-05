@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import functions
 
 def lambda_handler(event, context):
+
+    # Filters out child orders when they reactivate this function after being created in Shipstation
     orders = [order for order in functions.extract_data_from_resource_url(event) if "-" not in str(order['orderNumber'])]
     print(f"Number of processable orders: {len(orders)}")
 
