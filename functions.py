@@ -87,6 +87,10 @@ def should_add_gnome_to_parent_order(parent_order):
     custom_field1 = parent_order['advancedOptions'].get('customField1', "")
     return isinstance(custom_field1, str) and "First" in custom_field1 and any(isLawnPlan(item["sku"]) for item in parent_order["items"])
 
+def append_tag_if_not_exists(tag, custom_field):
+    if tag not in custom_field:
+        custom_field += (", " if custom_field else "") + tag
+    return custom_field
 
 def set_order_tags(order, parent_order, total_pouches):
     if order.get('tagIds') is not None:
@@ -106,13 +110,15 @@ def set_order_tags(order, parent_order, total_pouches):
     if 'Amazon' in parent_tags:
         order['tagIds'].append(63002)
         if not order['advancedOptions'].get('customField1'):
-            order['advancedOptions']['customField1'] = 'Amazon'
+            append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'])
 
     if parent_has_lawn_plan and has_lawn_plan:
         if "First" in parent_tags:
             order['tagIds'].append(62743)
+            append_tag_if_not_exists('Subscription First Order', order['advancedOptions']['customField1'])
         elif "Recurring" or "Prepaid" in parent_tags:
             order['tagIds'].append(62744)
+            append_tag_if_not_exists('Subscription Recurring', order['advancedOptions']['customField1'])
 
     otp_order_counter = 0
     for item in order['items']:
