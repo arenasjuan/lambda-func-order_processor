@@ -89,7 +89,7 @@ def should_add_gnome_to_parent_order(parent_order):
 
 def set_order_tags(order, parent_order, total_pouches):
     if order.get('tagIds') is not None:
-        if 64097 in order['tagIds']:
+        if 64097 in order['tagIds'] and any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items']):
             order['tagIds'] = [64097]
         else:
             order['tagIds'] = []
