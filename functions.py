@@ -93,6 +93,11 @@ def append_tag_if_not_exists(tag, custom_field):
     return custom_field
 
 def set_order_tags(order, parent_order, total_pouches):
+    if 'customField1' in order['advancedOptions']:
+        del order['advancedOptions']['customField1']
+        order['advancedOptions']['customField1'] = ""
+    
+    
     if order.get('tagIds') is not None:
         if 64097 in order['tagIds'] and any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items']):
             order['tagIds'] = [64097]
