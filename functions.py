@@ -96,8 +96,7 @@ def set_order_tags(order, parent_order, total_pouches):
     if 'customField1' in order['advancedOptions']:
         del order['advancedOptions']['customField1']
         order['advancedOptions']['customField1'] = ""
-    
-    
+
     if order.get('tagIds') is not None:
         if 64097 in order['tagIds'] and any(item['sku'] in ('OTP - STK', 'OTP - LYL') for item in order['items']):
             order['tagIds'] = [64097]
@@ -114,8 +113,7 @@ def set_order_tags(order, parent_order, total_pouches):
     
     if 'Amazon' in parent_tags:
         order['tagIds'].append(63002)
-        if not order['advancedOptions'].get('customField1'):
-            append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'])
+        append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'])
 
     if parent_has_lawn_plan and has_lawn_plan:
         if "First" in parent_tags:
