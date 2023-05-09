@@ -31,6 +31,8 @@ def processor(order):
     mlp_data = {}
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
     if has_lawn_plan:
+        if "-" in order_number:
+            order_number = order_number.split("-")[0]
         url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
         response_mlp = session.get(url_mlp)
         data_mlp = response_mlp.json()
@@ -78,9 +80,6 @@ def process_item(item, mlp_data):
             replacement_name = config.SKU_REPLACEMENTS[original_sku]
             item["name"] = replacement_name
     return item
-
-def order_split_required(order):
-    return total_pouches(order) > 9
 
 
 def should_add_gnome_to_parent_order(parent_order):
@@ -191,7 +190,9 @@ def total_pouches(order):
 def process_order(order, mlp_data, parent_has_gnome=False):
     need_gnome = should_add_gnome_to_parent_order(order) if not parent_has_gnome else False
 
-    if order_split_required(order):
+    parent_pouches = total_pouches(order)
+
+    if "-" not in order['orderNumber'] and parent_pouches > 9:
         # Prepare the child orders and parent order
         original_order, child_orders = prepare_split_data(order, mlp_data, need_gnome)
 
@@ -214,7 +215,6 @@ def process_order(order, mlp_data, parent_has_gnome=False):
         return
 
     else:
-        parent_pouches = total_pouches(order)
         if need_gnome:
             gnome_item = config.gnome
             order['items'].append(gnome_item)
