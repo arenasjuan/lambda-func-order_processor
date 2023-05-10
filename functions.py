@@ -206,7 +206,7 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
     else:
         updated_advanced_options = preset['advancedOptions']
     updated_order['advancedOptions'] = updated_advanced_options
-    
+
     return updated_order
 
 
@@ -246,12 +246,13 @@ def process_order(order, mlp_data, parent_has_gnome=False):
         return
 
     else:
+        is_parent = ("-" not in order['orderNumber'] or "-1" in order['orderNumber']) and order['advancedOptions']['storeId'] != 310067 and not order['advancedOptions']['parentId']
         if need_gnome:
             gnome_item = config.gnome
             order['items'].append(gnome_item)
-            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent=True, use_gnome_preset=True)
+            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent, use_gnome_preset=True)
         else:
-            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent=True)
+            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent)
         copied_order = copy.deepcopy(order)
         order = set_order_tags(order, copied_order, parent_pouches)
         response = submit_order(order)
@@ -399,7 +400,7 @@ def prepare_child_order(args):
     child_order['orderKey'] = str(uuid.uuid4())
     child_pouches = total_pouches(child_order)
 
-    child_order = apply_preset_based_on_pouches(child_order, mlp_data, child_pouches, is_parent=True)
+    child_order = apply_preset_based_on_pouches(child_order, mlp_data, child_pouches)
 
     child_order = set_order_tags(child_order, parent_order, child_pouches)
 
