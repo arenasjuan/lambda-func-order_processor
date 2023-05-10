@@ -30,14 +30,24 @@ def processor(order):
 
     mlp_data = {}
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
-    if has_lawn_plan:
-        if "-" in order_number:
-            order_number = order_number.split("-")[0]
-        url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
-        response_mlp = session.get(url_mlp)
-        data_mlp = response_mlp.json()
-        plan_details = data_mlp.get("plan_details", [])
+    if "-" in order_number:
+        order_number = order_number.split("-")[0]
+    url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
+    response_mlp = session.get(url_mlp)
+    data_mlp = response_mlp.json()
+    
+    # Check for green_sprayers
+    green_sprayers = data_mlp.get("green_sprayers", 0)
+    if green_sprayers > 0:
+        mlp_data['OTP - HES - G'] = [{'name': 'Reusable Sprayer', 'count': green_sprayers}]
 
+    # Check for yellow_sprayers
+    yellow_sprayers = data_mlp.get("yellow_sprayers", 0)
+    if yellow_sprayers > 0:
+        mlp_data['OTP - HES - Y'] = [{'name': 'Reusable Lawn Guard Sprayer', 'count': yellow_sprayers}]
+
+    if has_lawn_plan:
+        plan_details = data_mlp.get("plan_details", [])
         for order_item in order['items']:
             if isLawnPlan(order_item['sku']):
                 for detail in plan_details:
@@ -52,6 +62,7 @@ def processor(order):
                         break
 
     process_order(order, mlp_data)
+
 
 
 def extract_data_from_resource_url(event):
@@ -86,14 +97,20 @@ def should_add_gnome_to_parent_order(parent_order):
     custom_field1 = parent_order['advancedOptions'].get('customField1', "")
     return isinstance(custom_field1, str) and "First" in custom_field1 and any(isLawnPlan(item["sku"]) for item in parent_order["items"])
 
-def append_tag_if_not_exists(tag, custom_field):
+def append_tag_if_not_exists(tag, custom_field, field_number):
+    if custom_field is None:
+        custom_field = ""
+
     if tag not in custom_field:
-        custom_field += (", " if custom_field else "") + tag
+        if field_number == 1:
+            custom_field += (", " if custom_field else "") + tag
+        else:
+            custom_field += tag
     return custom_field
+
 
 def set_order_tags(order, parent_order, total_pouches):
     if 'customField1' in order['advancedOptions']:
-        del order['advancedOptions']['customField1']
         order['advancedOptions']['customField1'] = ""
 
     if order.get('tagIds') is not None:
@@ -112,15 +129,17 @@ def set_order_tags(order, parent_order, total_pouches):
     
     if 'Amazon' in parent_tags:
         order['tagIds'].append(63002)
-        append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'])
+        append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'], 1)
 
     if parent_has_lawn_plan and has_lawn_plan:
         if "First" in parent_tags:
             order['tagIds'].append(62743)
-            append_tag_if_not_exists('Subscription First Order', order['advancedOptions']['customField1'])
+            append_tag_if_not_exists('Subscription First Order', order['advancedOptions']['customField1'], 1)
+            append_tag_if_not_exists('F', order['advancedOptions']['customField2'], 2)
         elif "Recurring" or "Prepaid" in parent_tags:
             order['tagIds'].append(62744)
-            append_tag_if_not_exists('Subscription Recurring', order['advancedOptions']['customField1'])
+            append_tag_if_not_exists('Subscription Recurring', order['advancedOptions']['customField1'], 1)
+            append_tag_if_not_exists('R', order['advancedOptions']['customField2'], 2)
 
     otp_order_counter = 0
     for item in order['items']:
@@ -150,7 +169,7 @@ def set_order_tags(order, parent_order, total_pouches):
 
     return order
 
-def apply_preset_based_on_pouches(order, mlp_data, total_pouches, use_gnome_preset=False):
+def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = False, use_gnome_preset=False):
     preset = {}
 
     with ThreadPoolExecutor(max_workers=len(order['items'])) as executor:
@@ -159,14 +178,26 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, use_gnome_pres
     order['items'] = processed_items
 
     preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
-
+    
     preset_key = str(total_pouches)
     if preset_key in preset_dict:
         preset = preset_dict[preset_key]
-
+    
     updated_order = order.copy()
     for key, value in preset.items():
         updated_order[key] = value
+
+    # Add green sprayer to items
+    if 'OTP - HES - G' in mlp_data and is_parent:
+        green_sprayers = config.green_sprayer.copy()
+        green_sprayers['quantity'] = mlp_data['OTP - HES - G'][0]['count']
+        updated_order['items'].append(green_sprayers)
+
+    # Add yellow sprayer to items
+    if 'OTP - HES - Y' in mlp_data and any('LG' in item['sku'] for item in order['items']):
+        yellow_sprayers = config.yellow_sprayer.copy()
+        yellow_sprayers['quantity'] = mlp_data['OTP - HES - Y'][0]['count']
+        updated_order['items'].append(yellow_sprayers)
 
     if 'advancedOptions' in order and 'advancedOptions' in preset:
         updated_advanced_options = {**order['advancedOptions'], **preset['advancedOptions']}
@@ -174,10 +205,10 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, use_gnome_pres
         updated_advanced_options = order['advancedOptions']
     else:
         updated_advanced_options = preset['advancedOptions']
-
     updated_order['advancedOptions'] = updated_advanced_options
-
+    
     return updated_order
+
 
 
 def submit_order(order):
@@ -218,9 +249,9 @@ def process_order(order, mlp_data, parent_has_gnome=False):
         if need_gnome:
             gnome_item = config.gnome
             order['items'].append(gnome_item)
-            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, use_gnome_preset=True)
+            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent=True, use_gnome_preset=True)
         else:
-            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches)
+            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent=True)
         copied_order = copy.deepcopy(order)
         order = set_order_tags(order, copied_order, parent_pouches)
         response = submit_order(order)
@@ -317,11 +348,11 @@ def prepare_split_data(order, mlp_data, need_gnome):
         gnome = config.gnome
         original_order['items'].append(gnome)
         original_order = apply_preset_based_on_pouches(
-            original_order, mlp_data, order_pouches, use_gnome_preset=True
+            original_order, mlp_data, order_pouches, is_parent=True, use_gnome_preset=True
         )
     else:
         original_order = apply_preset_based_on_pouches(
-            original_order, mlp_data, order_pouches
+            original_order, mlp_data, order_pouches, is_parent=True
         )
 
     with ThreadPoolExecutor(max_workers=len(bins) - 1) as executor:
@@ -335,7 +366,7 @@ def prepare_split_data(order, mlp_data, need_gnome):
             child_orders.append(result)
 
     original_order['orderNumber'] = f"{original_order['orderNumber']}-1"
-    original_order['advancedOptions']['customField2'] = f"Shipment 1 of {total_shipments}"
+    original_order['advancedOptions']['customField3'] = f"Shipment 1 of {total_shipments}"
 
     print(f"(Log for #{order['orderNumber']}) Parent order for {order['orderNumber']}: {original_order}", flush=True)
     print(f"(Log for #{order['orderNumber']}) Child_orders for {order['orderNumber']}: {child_orders}", flush=True)
@@ -368,7 +399,7 @@ def prepare_child_order(args):
     child_order['orderKey'] = str(uuid.uuid4())
     child_pouches = total_pouches(child_order)
 
-    child_order = apply_preset_based_on_pouches(child_order, mlp_data, child_pouches)
+    child_order = apply_preset_based_on_pouches(child_order, mlp_data, child_pouches, is_parent=True)
 
     child_order = set_order_tags(child_order, parent_order, child_pouches)
 
