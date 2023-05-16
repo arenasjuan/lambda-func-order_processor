@@ -37,7 +37,7 @@ def processor(order):
 
     if response_mlp.status_code != 200:
         failed.append(order_number)
-        print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Response status code: {response.status_code} // Response content: {response_mlp.content}", flush=True)
+        print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
         return None
 
     data_mlp = response_mlp.json()
