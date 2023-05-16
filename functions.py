@@ -34,6 +34,12 @@ def processor(order):
         order_number = order_number.split("-")[0]
     url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
     response_mlp = session.get(url_mlp)
+
+    if response_mlp.status_code != 200:
+        failed.append(order_number)
+        print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Response status code: {response.status_code} // Response content: {response_mlp.content}", flush=True)
+        return None
+
     data_mlp = response_mlp.json()
     
     # Check for green_sprayers
@@ -53,6 +59,7 @@ def processor(order):
                 for detail in plan_details:
                     if detail['sku'] == order_item['sku']:
                         product_list = []
+                        total_products = 0
                         for product in detail['products']:
                             product_list.append({
                                 'name': product['name'],
@@ -129,17 +136,18 @@ def set_order_tags(order, parent_order, total_pouches):
     
     if 'Amazon' in parent_tags:
         order['tagIds'].append(63002)
-        append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'], 1)
+        order['advancedOptions']['customField1'] = append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'], 1)
 
     if parent_has_lawn_plan and has_lawn_plan:
         if "First" in parent_tags:
             order['tagIds'].append(62743)
-            append_tag_if_not_exists('Subscription First Order', order['advancedOptions']['customField1'], 1)
-            append_tag_if_not_exists('F', order['advancedOptions']['customField2'], 2)
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists('Subscription First Order', order['advancedOptions']['customField1'], 1)
+            order['advancedOptions']['customField2'] = append_tag_if_not_exists('F', order['advancedOptions'].get('customField2', ''), 2)
         elif "Recurring" or "Prepaid" in parent_tags:
             order['tagIds'].append(62744)
-            append_tag_if_not_exists('Subscription Recurring', order['advancedOptions']['customField1'], 1)
-            append_tag_if_not_exists('R', order['advancedOptions']['customField2'], 2)
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists('Subscription Recurring', order['advancedOptions']['customField1'], 1)
+            order['advancedOptions']['customField2'] = append_tag_if_not_exists('R', order['advancedOptions'].get('customField2', ''), 2)
+
 
     otp_order_counter = 0
     for item in order['items']:
@@ -188,7 +196,7 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
         updated_order[key] = value
 
     # Add green sprayer to items
-    if 'OTP - HES - G' in mlp_data and is_parent:
+    if is_parent and 'OTP - HES - G' in mlp_data:
         green_sprayers = config.green_sprayer.copy()
         green_sprayers['quantity'] = mlp_data['OTP - HES - G'][0]['count']
         updated_order['items'].append(green_sprayers)
@@ -320,8 +328,14 @@ def prepare_split_data(order, mlp_data, need_gnome):
     if stk_item:
         bins[0].append(('OTP - STK', 1))
 
-    parent_items = bins[0]
     total_shipments = len(bins)
+
+    # Extract and divide the green sprayers
+    green_sprayers = mlp_data.get('OTP - HES - G', [{'count': 0}])[0]['count']
+    sprayers_per_order = green_sprayers // total_shipments
+    remainder = green_sprayers % total_shipments
+
+    mlp_data['OTP - HES - G'][0]['count'] = sprayers_per_order + remainder
 
     original_order_items = []
 
@@ -383,7 +397,7 @@ def prepare_child_order(args):
     child_order['tagIds'] = []
     child_order['orderNumber'] = f"{parent_order['orderNumber']}-{bin_index+2}"
     child_order['advancedOptions']['customField1'] = ''
-    child_order['advancedOptions']['customField2'] = f"Shipment {bin_index+2} of {total_shipments}"
+    child_order['advancedOptions']['customField3'] = f"Shipment {bin_index+2} of {total_shipments}"
     
     child_order_items = []
     for sku, item_count in bin:
@@ -394,6 +408,11 @@ def prepare_child_order(args):
             if item_copy['quantity'] > 0:
                 child_order_items.append(item_copy)
         else:
+            # Handle the sprayers
+            if sku == 'OTP - HES - G':
+                sprayer_item = config.green_sprayer.copy()
+                sprayer_item['quantity'] = item_count
+                child_order_items.append(sprayer_item)
             continue
     child_order['items'] = child_order_items
     child_order['orderTotal'] = 0.00
