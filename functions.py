@@ -328,14 +328,23 @@ def prepare_split_data(order, mlp_data, need_gnome):
     if stk_item:
         bins[0].append(('OTP - STK', 1))
 
+    parent_items = bins[0]
     total_shipments = len(bins)
 
-    # Extract and divide the green sprayers
-    green_sprayers = mlp_data.get('OTP - HES - G', [{'count': 0}])[0]['count']
-    sprayers_per_order = green_sprayers // total_shipments
-    remainder = green_sprayers % total_shipments
+    # Check if the order has green sprayers
+    if 'OTP - HES - G' in mlp_data:
 
-    mlp_data['OTP - HES - G'][0]['count'] = sprayers_per_order + remainder
+        # Extract and divide the green sprayers
+        green_sprayers = mlp_data.get('OTP - HES - G', [{'count': 0}])[0]['count']
+        sprayers_per_order = green_sprayers // total_shipments
+        remainder = green_sprayers % total_shipments
+
+        # Update the count in mlp_data
+        mlp_data['OTP - HES - G'][0]['count'] = sprayers_per_order + remainder
+
+        # Add sprayer items to each bin
+        for bin in bins[1:]:  # Skip the first bin (parent order)
+            bin.append(('OTP - HES - G', sprayers_per_order))
 
     original_order_items = []
 
