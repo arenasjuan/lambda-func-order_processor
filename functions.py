@@ -27,48 +27,54 @@ failed = []
 
 def processor(order):
     order_number = order['orderNumber']
-
-    mlp_data = {}
-    has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
+    
     if "-" in order_number:
         order_number = order_number.split("-")[0]
-    url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
-    response_mlp = session.get(url_mlp)
-
-    if response_mlp.status_code != 200:
-        failed.append(order_number)
-        print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
-        return None
-
-    data_mlp = response_mlp.json()
     
-    # Check for green_sprayers
-    green_sprayers = data_mlp.get("green_sprayers", 0)
-    if green_sprayers > 0:
-        mlp_data['OTP - HES - G'] = [{'name': 'Reusable Sprayer', 'count': green_sprayers}]
-
-    # Check for yellow_sprayers
-    yellow_sprayers = data_mlp.get("yellow_sprayers", 0)
-    if yellow_sprayers > 0:
-        mlp_data['OTP - HES - Y'] = [{'name': 'Reusable Lawn Guard Sprayer', 'count': yellow_sprayers}]
-
-    if has_lawn_plan:
-        plan_details = data_mlp.get("plan_details", [])
-        for order_item in order['items']:
-            if isLawnPlan(order_item['sku']):
-                for detail in plan_details:
-                    if detail['sku'] == order_item['sku']:
-                        product_list = []
-                        total_products = 0
-                        for product in detail['products']:
-                            product_list.append({
-                                'name': product['name'],
-                                'count': product['count']
-                            })
-                        mlp_data[detail['sku']] = product_list
-                        break
-
-    process_order(order, mlp_data)
+    if int(order_number) < 10525:
+        process_order(order, mlp_data)
+    else:
+        mlp_data = {}
+        
+        has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
+    
+        url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
+        response_mlp = session.get(url_mlp)
+    
+        if response_mlp.status_code != 200:
+            failed.append(order_number)
+            print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
+            return None
+    
+        data_mlp = response_mlp.json()
+        
+        # Check for green_sprayers
+        green_sprayers = data_mlp.get("green_sprayers", 0)
+        if green_sprayers > 0:
+            mlp_data['OTP - HES - G'] = [{'name': 'Reusable Sprayer', 'count': green_sprayers}]
+    
+        # Check for yellow_sprayers
+        yellow_sprayers = data_mlp.get("yellow_sprayers", 0)
+        if yellow_sprayers > 0:
+            mlp_data['OTP - HES - Y'] = [{'name': 'Reusable Lawn Guard Sprayer', 'count': yellow_sprayers}]
+    
+        if has_lawn_plan:
+            plan_details = data_mlp.get("plan_details", [])
+            for order_item in order['items']:
+                if isLawnPlan(order_item['sku']):
+                    for detail in plan_details:
+                        if detail['sku'] == order_item['sku']:
+                            product_list = []
+                            total_products = 0
+                            for product in detail['products']:
+                                product_list.append({
+                                    'name': product['name'],
+                                    'count': product['count']
+                                })
+                            mlp_data[detail['sku']] = product_list
+                            break
+    
+        process_order(order, mlp_data)
 
 
 
