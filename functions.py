@@ -26,18 +26,18 @@ session.headers.update(headers)
 failed = []
 
 def processor(order):
+    mlp_data = {}
+    
     order_number = order['orderNumber']
+    
+    has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
     
     if "-" in order_number:
         order_number = order_number.split("-")[0]
     
-    if int(order_number) < 10525:
+    if not has_lawn_plan and int(order_number) < 10525:
         process_order(order, mlp_data)
     else:
-        mlp_data = {}
-        
-        has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
-    
         url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
         response_mlp = session.get(url_mlp)
     
@@ -67,10 +67,17 @@ def processor(order):
                             product_list = []
                             total_products = 0
                             for product in detail['products']:
+                                total_products += product['count']
                                 product_list.append({
                                     'name': product['name'],
-                                    'count': product['count']
+                                    'count': product['count']  # Temporarily set count to product['count']
                                 })
+                                
+                            # Adjust counts if necessary
+                            if total_products > config.sku_to_pouches.get(detail['sku'], 0):
+                                for product in product_list:
+                                    product['count'] //= order_item['quantity']
+                            
                             mlp_data[detail['sku']] = product_list
                             break
     
@@ -232,8 +239,10 @@ def submit_order(order):
 def total_pouches(order):
     return sum(item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in order['items'])
 
-def process_order(order, mlp_data, parent_has_gnome=False):
-    need_gnome = should_add_gnome_to_parent_order(order) if not parent_has_gnome else False
+def process_order(order, mlp_data):
+    is_parent = ("-" not in order['orderNumber'] or "-1" in order['orderNumber']) and order['advancedOptions']['storeId'] != 310067
+    
+    need_gnome = is_parent and should_add_gnome_to_parent_order(order)
 
     parent_pouches = total_pouches(order)
 
@@ -260,7 +269,6 @@ def process_order(order, mlp_data, parent_has_gnome=False):
         return
 
     else:
-        is_parent = ("-" not in order['orderNumber'] or "-1" in order['orderNumber']) and order['advancedOptions']['storeId'] != 310067 and not order['advancedOptions']['parentId']
         if need_gnome:
             gnome_item = config.gnome
             order['items'].append(gnome_item)
