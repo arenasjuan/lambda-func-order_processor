@@ -42,9 +42,10 @@ def processor(order):
         response_mlp = session.get(url_mlp)
     
         if response_mlp.status_code != 200:
-            failed.append(order_number)
+            if has_lawn_plan:
+                failed.append(order_number)
             print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
-            return None
+            process_order(order, mlp_data)
     
         data_mlp = response_mlp.json()
         
@@ -194,7 +195,7 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
     preset = {}
 
     with ThreadPoolExecutor(max_workers=len(order['items'])) as executor:
-        processed_items = list(executor.map(lambda item: process_item(item, mlp_data), order['items']))
+        processed_items = list(executor.map(lambda item: process_item(item, mlp_data), [item for item in order['items'] if item['sku']]))
 
     order['items'] = processed_items
 
