@@ -393,7 +393,7 @@ def prepare_split_data(order, mlp_data, need_gnome):
         original_order['items'].append(gnome)
     if stk_order:
         original_order = apply_preset_based_on_pouches(
-            original_order, mlp_data, order_pouches, is_parent=True, stk_order
+            original_order, mlp_data, order_pouches, is_parent=True, use_stk_preset=True
         )
     else:
         original_order = apply_preset_based_on_pouches(
