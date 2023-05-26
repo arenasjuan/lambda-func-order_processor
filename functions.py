@@ -191,7 +191,7 @@ def set_order_tags(order, parent_order, total_pouches):
 
     return order
 
-def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = False, use_gnome_preset=False):
+def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = False, use_stk_preset=False):
     preset = {}
 
     with ThreadPoolExecutor(max_workers=len(order['items'])) as executor:
@@ -199,7 +199,7 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
 
     order['items'] = processed_items
 
-    preset_dict = config.presets_with_gnome if use_gnome_preset else config.presets
+    preset_dict = config.presets_with_stk if use_stk_preset else config.presets
     
     preset_key = str(total_pouches)
     if preset_key in preset_dict:
@@ -273,7 +273,8 @@ def process_order(order, mlp_data):
         if need_gnome:
             gnome_item = config.gnome
             order['items'].append(gnome_item)
-            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent, use_gnome_preset=True)
+        if any('STK' in item['sku'] or 'LYL' in item['sku'] for item in order['items']): 
+            order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent, True)
         else:
             order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent)
         copied_order = copy.deepcopy(order)
@@ -289,8 +290,7 @@ def process_order(order, mlp_data):
             print(f"(Log for #{order['orderNumber']}) Full error response: {response.__dict__}", flush=True)
         return
 
-def first_fit_decreasing(items, max_pouches_per_bin=9):
-    otp_lyl_present = any(item[0] == 'OTP - LYL' for item in items)
+def first_fit_decreasing(items, otp_lyl_present, max_pouches_per_bin=9):
     if otp_lyl_present:
         items = [(sku, count) for sku, count in items if sku != 'OTP - LYL']
     items = sorted(items, key=lambda x: x[1], reverse=True)
@@ -335,7 +335,11 @@ def prepare_split_data(order, mlp_data, need_gnome):
         (item['sku'], item['quantity'])
         for item in original_order['items'] if item['sku']
     ]
-    bins = first_fit_decreasing(items_with_quantity)
+
+    otp_lyl_present = any('LYL' in item['sku'] for item in original_order['items'])
+    stk_order = otp_lyl_present
+
+    bins = first_fit_decreasing(items_with_quantity, otp_lyl_present)
 
     stk_item = next(
         (item for item in original_order['items'] if item['sku'] == 'OTP - STK'), None
@@ -368,6 +372,7 @@ def prepare_split_data(order, mlp_data, need_gnome):
             continue
         if item['sku'] == 'OTP - STK':
             original_order_items.append(item)
+            stk_order = True
             continue
 
         parent_item = next(
@@ -386,8 +391,9 @@ def prepare_split_data(order, mlp_data, need_gnome):
     if need_gnome:
         gnome = config.gnome
         original_order['items'].append(gnome)
+    if stk_order:
         original_order = apply_preset_based_on_pouches(
-            original_order, mlp_data, order_pouches, is_parent=True, use_gnome_preset=True
+            original_order, mlp_data, order_pouches, is_parent=True, stk_order
         )
     else:
         original_order = apply_preset_based_on_pouches(
