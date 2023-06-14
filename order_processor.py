@@ -5,10 +5,10 @@ import functions
 def lambda_handler(event, context):
 
     # Filters out child orders when they reactivate this function after being created in Shipstation
-    orders = [order for order in functions.extract_data_from_resource_url(event) if not ("-" in str(order['orderNumber']) and order['advancedOptions'].get('storeId') != 310067)]
+    orders = [order for order in functions.extract_data_from_resource_url(event) if "-" not in order['orderNumber']]
     print(f"{len(orders)} processable orders: {[order['orderNumber'] for order in orders]}")
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(functions.processor, order) for order in orders]
         for future in as_completed(futures):
             future.result()

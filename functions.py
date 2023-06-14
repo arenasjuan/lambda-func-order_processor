@@ -44,45 +44,47 @@ def processor(order):
         if response_mlp.status_code != 200:
             if has_lawn_plan:
                 failed.append(order_number)
-            print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
+            print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Processing without MLP / sprayer info // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
             process_order(order, mlp_data)
+
+        else:
     
-        data_mlp = response_mlp.json()
+            data_mlp = response_mlp.json()
+            
+            # Check for green_sprayers
+            green_sprayers = int(data_mlp.get("green_sprayers", 0))
+            if green_sprayers > 0:
+                mlp_data['OTP - HES - G'] = [{'name': 'Reusable Sprayer', 'count': green_sprayers}]
         
-        # Check for green_sprayers
-        green_sprayers = data_mlp.get("green_sprayers", 0)
-        if green_sprayers > 0:
-            mlp_data['OTP - HES - G'] = [{'name': 'Reusable Sprayer', 'count': green_sprayers}]
-    
-        # Check for yellow_sprayers
-        yellow_sprayers = data_mlp.get("yellow_sprayers", 0)
-        if yellow_sprayers > 0:
-            mlp_data['OTP - HES - Y'] = [{'name': 'Reusable Lawn Guard Sprayer', 'count': yellow_sprayers}]
-    
-        if has_lawn_plan:
-            plan_details = data_mlp.get("plan_details", [])
-            for order_item in order['items']:
-                if isLawnPlan(order_item['sku']):
-                    for detail in plan_details:
-                        if detail['sku'] == order_item['sku']:
-                            product_list = []
-                            total_products = 0
-                            for product in detail['products']:
-                                total_products += product['count']
-                                product_list.append({
-                                    'name': product['name'],
-                                    'count': product['count']  # Temporarily set count to product['count']
-                                })
+            # Check for yellow_sprayers
+            yellow_sprayers = int(data_mlp.get("yellow_sprayers", 0))
+            if yellow_sprayers > 0:
+                mlp_data['OTP - HES - Y'] = [{'name': 'Reusable Lawn Guard Sprayer', 'count': yellow_sprayers}]
+        
+            if has_lawn_plan:
+                plan_details = data_mlp.get("plan_details", [])
+                for order_item in order['items']:
+                    if isLawnPlan(order_item['sku']):
+                        for detail in plan_details:
+                            if detail['sku'] == order_item['sku']:
+                                product_list = []
+                                total_products = 0
+                                for product in detail['products']:
+                                    product['count'] = int(product['count'])
+                                    total_products += product['count']
+                                    product_list.append({
+                                        'name': product['name'],
+                                        'count': product['count']  # Temporarily set count to product['count']
+                                    })
+                                    
+                                # Adjust counts if necessary
+                                if total_products > config.sku_to_pouches.get(detail['sku'], 0):
+                                    for product in product_list:
+                                        product['count'] = int(product['count']) // order_item['quantity']
                                 
-                            # Adjust counts if necessary
-                            if total_products > config.sku_to_pouches.get(detail['sku'], 0):
-                                for product in product_list:
-                                    product['count'] //= order_item['quantity']
-                            
-                            mlp_data[detail['sku']] = product_list
-                            break
-    
-        process_order(order, mlp_data)
+                                mlp_data[detail['sku']] = product_list
+                                break
+            process_order(order, mlp_data)
 
 
 
@@ -151,6 +153,15 @@ def set_order_tags(order, parent_order, total_pouches):
     if 'Amazon' in parent_tags:
         order['tagIds'].append(63002)
         order['advancedOptions']['customField1'] = append_tag_if_not_exists('Amazon', order['advancedOptions']['customField1'], 1)
+
+    if 'AfterSell' in parent_tags:
+        order['tagIds'].append(66490)
+        if 'Upsell' in parent_tags:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists('AfterSell Upsell', order['advancedOptions']['customField1'], 1)
+        elif 'Original' in parent_tags:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists('AfterSell TY Original', order['advancedOptions']['customField1'], 1)
+        elif 'Page' in parent_tags:
+            order['advancedOptions']['customField1'] = append_tag_if_not_exists('AfterSell TY Page', order['advancedOptions']['customField1'], 1)
 
     if parent_has_lawn_plan and has_lawn_plan:
         if "First" in parent_tags:
@@ -230,7 +241,6 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
     updated_order['advancedOptions'] = updated_advanced_options
 
     return updated_order
-
 
 
 def submit_order(order):
