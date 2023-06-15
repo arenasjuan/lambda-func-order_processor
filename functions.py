@@ -44,7 +44,7 @@ def processor(order):
         if response_mlp.status_code != 200:
             if has_lawn_plan:
                 failed.append(order_number)
-            print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Processing without MLP / sprayer info // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
+            print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Processing without MLP or sprayer info // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
             process_order(order, mlp_data)
 
         else:
@@ -88,14 +88,25 @@ def processor(order):
 
 
 
-def extract_data_from_resource_url(event):
-    payload = json.loads(event["body"])
-    resource_url = payload['resource_url']
-    print(f"Fetching data from resource url: {resource_url}")
-    response = session.get(resource_url)
-    data = response.json()
-    orders = data['orders']
-    return orders
+def extract_data_from_resource_url(event, retries=3):
+    for attempts in range(1, retries + 1):
+        try:
+            payload = json.loads(event["body"])
+            resource_url = payload['resource_url']
+            print(f"Fetching data from resource_url: {resource_url}")
+            response = session.get(resource_url)
+            data = response.json()
+            orders = data['orders']
+            return orders
+        except Exception as e:
+            if attempts < retries:
+                print(f"An error occurred: {str(e)}. Making another attempt...")
+            elif attempts == retries:
+                print(f"An error occurred: {str(e)}. Making final attempt...")
+    return None  # If all attempts fail, return None
+
+
+
 
 def isLawnPlan(sku):
     return (sku.startswith('SUB') or sku in ['05000', '10000', '15000']) and sku not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]
@@ -205,7 +216,7 @@ def set_order_tags(order, parent_order, total_pouches):
 def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = False, use_stk_preset=False):
     preset = {}
 
-    with ThreadPoolExecutor(max_workers=len(order['items'])) as executor:
+    with ThreadPoolExecutor(max_workers=8 if len(order['items']) == 0 else len(order['items'])) as executor:
         processed_items = list(executor.map(lambda item: process_item(item, mlp_data), [item for item in order['items'] if item['sku']]))
 
     order['items'] = processed_items
@@ -452,7 +463,8 @@ def prepare_child_order(args):
             if sku == 'OTP - HES - G':
                 sprayer_item = config.green_sprayer.copy()
                 sprayer_item['quantity'] = item_count
-                child_order_items.append(sprayer_item)
+                if sprayer_item['quantity'] > 0:
+                    child_order_items.append(sprayer_item)
             continue
     child_order['items'] = child_order_items
     child_order['orderTotal'] = 0.00
