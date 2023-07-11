@@ -9,6 +9,8 @@ import threading
 import json
 import time
 from typing import List, Tuple
+from datetime import datetime
+from dateutil import tz
 
 auth_string = f"{config.SHIPSTATION_API_KEY}:{config.SHIPSTATION_API_SECRET}"
 encoded_auth_string = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -22,13 +24,26 @@ headers = {
 session = requests.Session()
 session.headers.update(headers)
 
+# Get Pacific timezone object
+tz_us_pacific = tz.gettz('US/Pacific')
+
+# Get the current datetime in local timezone
+start_time = datetime.now(tz_us_pacific)
+
 
 failed = []
+rate_limited: []
 
 def processor(order):
     mlp_data = {}
     
     order_number = order['orderNumber']
+
+    weed_wizard_skus = ["SUB - WW - D" , "SUB - WW - S" , "SUB - WW - G" ]
+
+    non_weed_wizard_items = [item for item in order['items'] if item['sku'] not in weed_wizard_skus]
+
+    weed_wizard_only_order = len(non_weed_wizard_items) <= 1 and all(not item.get('sku') for item in non_weed_wizard_items)
     
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
     
@@ -53,7 +68,7 @@ def processor(order):
             
             # Check for green_sprayers
             green_sprayers = int(data_mlp.get("green_sprayers", 0))
-            if green_sprayers > 0:
+            if green_sprayers > 0 and not weed_wizard_only_order:
                 mlp_data['OTP - HES - G'] = [{'name': 'Reusable Sprayer', 'count': green_sprayers}]
         
             # Check for yellow_sprayers
@@ -106,25 +121,8 @@ def extract_data_from_resource_url(event, retries=3):
     return None  # If all attempts fail, return None
 
 
-
-
 def isLawnPlan(sku):
-    return (sku.startswith('SUB') or sku in ['05000', '10000', '15000']) and sku not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G"]
-
-def process_item(item, mlp_data):
-    original_sku = item["sku"]
-    if original_sku in config.SKU_REPLACEMENTS:
-        if isLawnPlan(original_sku):
-            for sku, products_info in mlp_data.items():
-                if sku == original_sku:
-                    item['name'] = config.SKU_REPLACEMENTS[original_sku]
-                    for product_info in products_info:
-                        item['name'] += f"\n\u00A0\u00A0\u00A0\u00A0• {product_info['count']} {product_info['name']}"
-                    break
-        else:
-            replacement_name = config.SKU_REPLACEMENTS[original_sku]
-            item["name"] = replacement_name
-    return item
+    return (sku.startswith('SUB') or sku in ['05000', '10000', '15000']) and sku not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G", "SUB - WW - D" , "SUB - WW - S" , "SUB - WW - G" ]
 
 
 def should_add_gnome_to_parent_order(parent_order):
@@ -132,7 +130,7 @@ def should_add_gnome_to_parent_order(parent_order):
     return isinstance(custom_field1, str) and "First" in custom_field1 and any(isLawnPlan(item["sku"]) for item in parent_order["items"])
 
 def append_tag_if_not_exists(tag, custom_field, field_number):
-    if custom_field is None:
+    if not custom_field:
         custom_field = ""
 
     if tag not in custom_field:
@@ -179,7 +177,7 @@ def set_order_tags(order, parent_order, total_pouches):
             order['tagIds'].append(62743)
             order['advancedOptions']['customField1'] = append_tag_if_not_exists('Subscription First Order', order['advancedOptions']['customField1'], 1)
             order['advancedOptions']['customField2'] = append_tag_if_not_exists('F', order['advancedOptions'].get('customField2', ''), 2)
-        elif "Recurring" or "Prepaid" in parent_tags:
+        elif "Recurring" in parent_tags or "Prepaid" in parent_tags:
             order['tagIds'].append(62744)
             order['advancedOptions']['customField1'] = append_tag_if_not_exists('Subscription Recurring', order['advancedOptions']['customField1'], 1)
             order['advancedOptions']['customField2'] = append_tag_if_not_exists('R', order['advancedOptions'].get('customField2', ''), 2)
@@ -203,33 +201,77 @@ def set_order_tags(order, parent_order, total_pouches):
             order['tagIds'].append(59794)
             continue
         if 'OLFP' in item['sku'] or 'Organic' in item['sku'] or 'Organic Lawn' in item['name']:
-            order['tagIds'].append( 62745)
+            order['tagIds'].append(62745)
 
     if otp_order_counter == len(order['items']):
         order['tagIds'].append(59254)
 
-    if 0 < total_pouches <= 9:
+    if 0 < total_pouches <= 10:
         order['tagIds'].append(config.pouch_tags[total_pouches])
 
     return order
 
+def update_dict(original, updates):
+    for key, value in updates.items():
+        if isinstance(value, dict):
+            # Get the original value if it's a dictionary, otherwise create an empty dict
+            nested_original = original.get(key, {}) if isinstance(original.get(key), dict) else {}
+            original[key] = update_dict(nested_original, value)
+        else:
+            original[key] = value
+    return original
+
+
+
+def process_item(item, mlp_data):
+    original_sku = item["sku"]
+    weight = 0
+    if original_sku in config.SKU_REPLACEMENTS:
+        if isLawnPlan(original_sku):
+            for sku, products_info in mlp_data.items():
+                if sku == original_sku:
+                    item['name'] = config.SKU_REPLACEMENTS[original_sku]
+                    for product_info in products_info:
+                        if 'Plan' not in product_info['name']:
+                            item['name'] += f"\n\u00A0\u00A0\u00A0\u00A0• {product_info['count']} {product_info['name']}"
+                            weight += config.product_weights[product_info['name']]*int(product_info['count'])
+                    break
+        else:
+            replacement_name = config.SKU_REPLACEMENTS[original_sku]
+            item["name"] = replacement_name
+            weight = config.product_weights[replacement_name] * item['quantity']
+    return (item, weight)
+
+
 def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = False, use_stk_preset=False):
+    if len(order['items']) == 1 and use_stk_preset:
+        order = update_dict(order, config.stk_only)
+        return order
+
     preset = {}
 
-    with ThreadPoolExecutor(max_workers=8 if len(order['items']) == 0 else len(order['items'])) as executor:
+    order['weight']['value'] = 0
+
+    with ThreadPoolExecutor(max_workers=len(order['items'])) as executor:
         processed_items = list(executor.map(lambda item: process_item(item, mlp_data), [item for item in order['items'] if item['sku']]))
 
-    order['items'] = processed_items
+    order['items'] = [item for item, _ in processed_items]
+
+    weight = sum([w for _, w in processed_items])
+
+    if total_pouches == 0:
+        order = update_dict(order, config.other_usps_items)
+        order['weight']['value'] = weight
+        return order
 
     preset_dict = config.presets_with_stk if use_stk_preset else config.presets
     
     preset_key = str(total_pouches)
     if preset_key in preset_dict:
-        preset = preset_dict[preset_key]
+        preset = copy.deepcopy(preset_dict[preset_key])
     
     updated_order = order.copy()
-    for key, value in preset.items():
-        updated_order[key] = value
+    updated_order = update_dict(updated_order, preset)
 
     # Add green sprayer to items
     if is_parent and 'OTP - HES - G' in mlp_data:
@@ -238,20 +280,283 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
         updated_order['items'].append(green_sprayers)
 
     # Add yellow sprayer to items
-    if 'OTP - HES - Y' in mlp_data and any('LG' in item['sku'] for item in order['items']):
+    if 'OTP - HES - Y' in mlp_data and any('LG' in item['sku'] for item in updated_order['items']):
         yellow_sprayers = config.yellow_sprayer.copy()
         yellow_sprayers['quantity'] = mlp_data['OTP - HES - Y'][0]['count']
         updated_order['items'].append(yellow_sprayers)
 
-    if 'advancedOptions' in order and 'advancedOptions' in preset:
-        updated_advanced_options = {**order['advancedOptions'], **preset['advancedOptions']}
-    elif 'advancedOptions' in order:
-        updated_advanced_options = order['advancedOptions']
-    else:
-        updated_advanced_options = preset['advancedOptions']
-    updated_order['advancedOptions'] = updated_advanced_options
+    updated_order['weight']['value'] += weight
+
+    if 'advancedOptions' in updated_order and 'advancedOptions' in preset:
+        updated_order['advancedOptions'] = update_dict(updated_order['advancedOptions'], preset['advancedOptions'])
+    elif 'advancedOptions' not in updated_order and 'advancedOptions' in preset:
+        updated_order['advancedOptions'] = preset['advancedOptions']
+
+    rate_shop(updated_order)
 
     return updated_order
+
+
+
+def get_ups_token():
+    oauth_url = "https://wwwcie.ups.com/security/v1/oauth/token"
+
+    payload = {
+        "grant_type": "client_credentials"
+    }
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    response = session.post(oauth_url, data=payload, headers=headers, auth=(config.UPS_CLIENT_ID, config.UPS_CLIENT_SECRET))
+    if response.status_code != 200:
+        print("Error occurred: ", response.text)  # Print the error message
+        response.raise_for_status()  # This will raise an exception if the request failed
+
+    data = response.json()
+    return data["access_token"]
+
+def get_ups_rate(order):
+    rating_url = "https://onlinetools.ups.com/ship/v1/rating/Rate"
+
+    headers = {
+        "Content-Type": "application/json",
+        "transId": start_time.strftime('%m-%d-%Y_%H:%M'),
+        "transactionSrc": "GnomeHQ",
+        "AccessLicenseNumber": config.UPS_ACCESS_KEY,
+        "Username" : config.UPS_USERNAME,
+        "Password" : config.UPS_PW
+    }
+
+    # Create rate request dictionary
+    request_dictionary = {
+        "RateRequest": {
+            "CustomerClassification": {"Code": "00"},
+            "PickupType": {"Code": "01"},
+            "Shipment": {
+                "Package": {
+                    "Dimensions": {
+                        "UnitOfMeasurement": {"Code": "IN"},
+                        "Height": str(order['dimensions']['height']),
+                        "Length": str(order['dimensions']['length']),
+                        "Width": str(order['dimensions']['width'])
+                    },
+                    "PackageWeight": {
+                        "UnitOfMeasurement": {"Code": "LBS"},
+                        "Weight": str(order['weight']['value'] / 16)
+                    },
+                    "PackagingType": {
+                        "Code": "02"
+                    }
+                },
+                "Service": {
+                    "Code": "03",
+                    "Description": "Ground"
+                },
+                "ShipFrom": {
+                    "Address": {
+                        "CountryCode": "US",
+                        "PostalCode": "90232",
+                        "StateProvinceCode": "CA"
+                    },
+                },
+                "ShipTo": {
+                    "Address": {
+                        "CountryCode": "US",
+                        "PostalCode": str(order['shipTo']['postalCode']),
+                        "ResidentialAddressIndicator" : "Y"
+                    },
+                },
+                "Shipper": {
+                    "Address": {
+                        "CountryCode": "US",
+                        "PostalCode": "90232",
+                        "StateProvinceCode": "CA"
+                    },
+                    "ShipperNumber": "8R1Y24"
+                },
+                "ShipmentRatingOptions": {"NegotiatedRatesIndicator": "Y"}
+            }
+        }
+    }
+
+    # Convert the dictionary to a JSON string
+    request_body = json.dumps(request_dictionary)
+
+    # Try operation
+    try:
+        response = session.post(rating_url, headers=headers, data=request_body)
+        response.raise_for_status()  # check that the request was successful
+
+        rate = response.json()['RateResponse']['RatedShipment']['NegotiatedRateCharges']['TotalCharge']['MonetaryValue']
+        
+        return float(rate)
+
+    except requests.exceptions.HTTPError as error:
+        print(f"An error occurred: {error}")
+        print(f"Response body: {response.text}")
+        return None
+
+
+def get_fedex_access_token():
+    url = "https://apis.fedex.com/oauth/token"
+
+    payload = {
+        'grant_type': 'client_credentials',
+        'client_id': config.FEDEX_API_KEY,
+        'client_secret': config.FEDEX_API_SECRET
+    }
+
+    headers = {
+        'Content-Type': "application/x-www-form-urlencoded"
+    }
+
+    response = requests.request("POST", url, data=payload, headers=headers)
+
+    if response.status_code == 200:
+        data = response.json()
+        return data['access_token']
+    else:
+        print("Failed to get FedEx access token")
+        return None
+
+
+
+
+
+def get_fedex_rate(order):
+    url = "https://apis.fedex.com/rate/v1/rates/quotes"
+
+    token = get_fedex_access_token()
+
+    headers = {
+        'Content-Type': "application/json",
+        'X-locale': "en_US",
+        'Authorization': f"Bearer {token}"
+    }
+
+    service = "GROUND_HOME_DELIVERY" if order['shipTo']['residential'] else "FEDEX_GROUND"
+
+    payload = {
+        "accountNumber": {
+            "value": config.FEDEX_ACCT_NO
+        },
+        "requestedShipment": {
+            "shipper": {
+                "address": {
+                    "postalCode": '90232',
+                    "countryCode": "US"
+                }
+            },
+            "recipient": {
+                "address": {
+                    "postalCode": order['shipTo']['postalCode'],
+                    "countryCode": "US",
+                    "residential": order['shipTo']['residential']
+                }
+            },
+            "rateRequestType": ["ACCOUNT"],
+            "pickupType": "USE_SCHEDULED_PICKUP",
+            "serviceType": service,
+            "requestedPackageLineItems": [
+                {
+                    "weight": {
+                        "units": "LB",
+                        "value": str(order['weight']['value'] / 16)  # ensure the weight is in pounds
+                    }
+                }
+            ]
+        }
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    data = response.json()
+
+    if response.status_code == 200:
+        data = response.json()
+        try:
+            rate = data['output']['rateReplyDetails'][0]['ratedShipmentDetails'][0]['totalNetCharge']
+        except KeyError:
+            print("Error: Unable to retrieve total net charge from response.")
+            rate = None
+    else:
+        print(f"Error: Received status code {response.status_code} from FedEx API: {response.text}")
+        rate = None
+
+    return float(rate)
+
+
+
+def get_shipstation_ups_rate(order):
+    url = "https://ssapi.shipstation.com/shipments/getrates"
+
+    payload = {
+        "carrierCode": 'ups_walleted',
+        "serviceCode": 'ups_ground',
+        "packageCode": 'package',
+        "fromPostalCode": '90232',
+        "fromCity": "Culver City",
+        "fromState": "CA",
+        "toCountry": 'US',
+        "toState": order['shipTo']['state'],
+        "toPostalCode": order['shipTo']['postalCode'],
+        "toCity": order['shipTo']['city'],
+        "weight": order['weight'],
+        "dimensions": order['dimensions'],
+        "confirmation": None,
+        "residential": order['shipTo']['residential']
+    }
+
+    headers = {
+        'Host': 'ssapi.shipstation.com',
+        'Authorization': f"Basic {encoded_auth_string}",
+        'Content-Type': 'application/json',
+        "X-Partner": config.x_partner
+    }
+
+    response = session.post(url, headers=headers, data=json.dumps(payload))
+    if response.status_code != 200:
+        if response.status_code == 429:
+                rate_limited.append(order)
+        failed.append(order['orderNumber'])
+        print(f"(Log for #{order['orderNumber']}): Failed to get Shipstation UPS rate")
+        return None
+    rates = response.json()
+
+    return rates[0]['shipmentCost'] + rates[0]['otherCost']
+
+
+def rate_shop(order):
+    fedex_service = 'fedex_home_delivery' if order['shipTo']['residential'] else 'fedex_ground'
+
+    carrier_codes = ['fedex', 'ups_walleted', 'ups']
+    service_codes = [fedex_service, 'ups_ground', 'ups_ground']
+    bill_to_accounts = [990329, 326495, 647173]  # Assuming this is the order for 'fedex', 'ups_walleted', 'ups'
+
+    cheapest_rate = None
+    cheapest_carrier = None
+    cheapest_service = None
+    cheapest_account = None
+
+    for carrier_code, service_code, account in zip(carrier_codes, service_codes, bill_to_accounts):
+        # Get rate based on carrier
+        if carrier_code == 'fedex':
+            rate = get_fedex_rate(order)
+        elif carrier_code == 'ups_walleted':
+            rate = get_shipstation_ups_rate(order)
+        else:
+            rate = get_ups_rate(order)
+
+        # Check if the rate is the cheapest so far
+        if cheapest_rate is None or rate < cheapest_rate:
+            cheapest_rate = rate
+            cheapest_carrier = carrier_code
+            cheapest_service = service_code
+            cheapest_account = account
+
+    order['carrierCode'] = cheapest_carrier
+    order['serviceCode'] = cheapest_service
+    order['advancedOptions']['billToMyOtherAccount'] = cheapest_account
 
 
 def submit_order(order):
@@ -268,7 +573,7 @@ def process_order(order, mlp_data):
 
     parent_pouches = total_pouches(order)
 
-    if "-" not in order['orderNumber'] and parent_pouches > 9:
+    if "-" not in order['orderNumber'] and parent_pouches > 10:
         # Prepare the child orders and parent order
         original_order, child_orders = prepare_split_data(order, mlp_data, need_gnome)
 
@@ -284,6 +589,8 @@ def process_order(order, mlp_data):
                 print(f"(Log for #{order_processed}) Order #{order_processed} created successfully", flush=True)
                 print(f"(Log for #{order_processed}) Full success response: {response.__dict__}", flush=True)
             else:
+                if response.status_code == 429:
+                    rate_limited.append(order)
                 failed.append(order_processed)
                 print(f"(Log for #{order_processed}) Unexpected status code for order #{order_processed}: {response.status_code}", flush=True)
                 print(f"(Log for #{order_processed}) Full error response: {response.__dict__}", flush=True)
@@ -306,12 +613,14 @@ def process_order(order, mlp_data):
             print(f"(Log for #{order['orderNumber']}) Successfully processed order #{order['orderNumber']} without splitting", flush=True)
             print(f"(Log for #{order['orderNumber']}) Full success response: {response.__dict__}", flush=True)
         else:
+            if response.status_code == 429:
+                rate_limited.append(order)
             failed.append(order['orderNumber'])
             print(f"(Log for #{order['orderNumber']}) Unexpected status code for order #{order['orderNumber']}: {response.status_code}", flush=True)
             print(f"(Log for #{order['orderNumber']}) Full error response: {response.__dict__}", flush=True)
         return
 
-def first_fit_decreasing(items, otp_lyl_present, max_pouches_per_bin=9):
+def first_fit_decreasing(items, otp_lyl_present, max_pouches_per_bin=10):
     if otp_lyl_present:
         items = [(sku, count) for sku, count in items if sku != 'OTP - LYL']
     items = sorted(items, key=lambda x: x[1], reverse=True)
@@ -373,7 +682,6 @@ def prepare_split_data(order, mlp_data, need_gnome):
 
     # Check if the order has green sprayers
     if 'OTP - HES - G' in mlp_data:
-
         # Extract and divide the green sprayers
         green_sprayers = mlp_data.get('OTP - HES - G', [{'count': 0}])[0]['count']
         sprayers_per_order = green_sprayers // total_shipments
