@@ -22,6 +22,13 @@ def lambda_handler(event, context):
         print("All orders processed successfully!")
     else:
         print(f"Failed to process {len(functions.failed)} orders: {functions.failed}")
+        if functions.no_mlp_or_sprayer_data:
+            print(f"Unable to pull MLP / sprayer data for {len(functions.no_mlp_or_sprayer_data)} orders: {functions.no_mlp_or_sprayer_data}")
+        if functions.no_mlp_data:
+            print(f"Unable to pull lawn plan products for {len(functions.no_mlp_data)} orders: {functions.no_mlp_data}")
+        if functions.no_rate:
+            print(f"Unable to get carrier rates for {len(functions.no_rate)} orders: {functions.no_rate}")
+
         if len(functions.rate_limited) > 0:
             print(f"Rate-limited on {len(functions.rate_limited)} orders: {order['orderNumber'] for order in functions.rate_limited}")
             print(f"Retrying rate-limited orders in 1 minute...")
@@ -40,7 +47,7 @@ def lambda_handler(event, context):
             if len(functions.failed) == 0:
                 print("All orders processed successfully!")
             else:
-                print(f"Retry failed on {len(functions.failed)} orders: {functions.failed}")
+                print(f"Second processing attempt failed on {len(functions.failed)} orders: {functions.failed}")
 
 
     return {

@@ -32,7 +32,10 @@ start_time = datetime.now(tz_us_pacific)
 
 
 failed = []
-rate_limited: []
+rate_limited = []
+no_mlp_or_sprayer_data = []
+no_mlp_data = []
+no_rate = []
 
 def processor(order):
     mlp_data = {}
@@ -55,8 +58,9 @@ def processor(order):
     else:
         url_mlp = f"https://user-api-dev-qhw6i22s2q-uc.a.run.app/order?shopify_order_no={order_number}"
         response_mlp = session.get(url_mlp)
-    
+
         if response_mlp.status_code != 200:
+            no_mlp_or_sprayer_data.append(order_number)
             if has_lawn_plan:
                 failed.append(order_number)
             print(f"(Log for #{order_number}) Error retrieving order info for #{order_number} // Processing without MLP or sprayer info // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
@@ -85,6 +89,10 @@ def processor(order):
                                 product_list = []
                                 total_products = 0
                                 for product in detail['products']:
+                                    if 'Bundle' in product['name'] or 'Plan' in product['name']:
+                                        no_mlp_data.append(order_number)
+                                        print(f"(Log for #{order_number}) Error retrieving plan info for #{order_number} // Processing without MLP info // Response status code: {response_mlp.status_code} // Response content: {response_mlp.content}", flush=True)
+                                        return process_order(order, mlp_data)
                                     product['count'] = int(product['count'])
                                     total_products += product['count']
                                     product_list.append({
@@ -122,7 +130,7 @@ def extract_data_from_resource_url(event, retries=3):
 
 
 def isLawnPlan(sku):
-    return (sku.startswith('SUB') or sku in ['05000', '10000', '15000']) and sku not in ["SUB - LG - D", "SUB - LG - S", "SUB - LG - G", "SUB - WW - D" , "SUB - WW - S" , "SUB - WW - G" ]
+    return (sku.startswith('SUB') or sku in ['05000', '10000', '15000']) and sku not in config.non_plan_subs
 
 
 def should_add_gnome_to_parent_order(parent_order):
@@ -153,7 +161,7 @@ def set_order_tags(order, parent_order, total_pouches):
     else:
         order['tagIds'] = []
 
-    lawn_plan_skus = ["MLP", "TLP", "SFLP", "OLFP", "Organic", "SELP", "GSLP"]
+    lawn_plan_skus = ["MLP", "TLP", "SFLP", "OLFP", "Organic", "SELP", "GSLP", "AALP", "HERO"]
     has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in lawn_plan_skus) for item in order['items'])
 
     parent_has_lawn_plan = any(any(plan_sku in item['sku'] for plan_sku in lawn_plan_skus) for item in parent_order['items'])
@@ -226,15 +234,29 @@ def update_dict(original, updates):
 def process_item(item, mlp_data):
     original_sku = item["sku"]
     weight = 0
-    if original_sku in config.SKU_REPLACEMENTS:
+
+    if original_sku == 'SUB - HERO - D':
+        weight = 217.6
+    elif original_sku == 'SUB - HERO - S':
+        if item['name'] == config.hero_standard[0]:
+            weight = 211.2
+        else:
+            weight = 212.32
+    elif original_sku == 'SUB - HERO - G':
+        if item['name'] == config.hero_giant[0]:
+            weight = 0
+        elif item['name'] == config.hero_giant[1]:
+            weight = 316.8
+        else:
+            weight = 312.48
+    elif original_sku in config.SKU_REPLACEMENTS:
         if isLawnPlan(original_sku):
             for sku, products_info in mlp_data.items():
                 if sku == original_sku:
                     item['name'] = config.SKU_REPLACEMENTS[original_sku]
                     for product_info in products_info:
-                        if 'Plan' not in product_info['name']:
-                            item['name'] += f"\n\u00A0\u00A0\u00A0\u00A0• {product_info['count']} {product_info['name']}"
-                            weight += config.product_weights[product_info['name']]*int(product_info['count'])
+                        item['name'] += f"\n\u00A0\u00A0\u00A0\u00A0• {product_info['count']} {product_info['name']}"
+                        weight += config.product_weights[product_info['name']]*int(product_info['count'])
                     break
         else:
             replacement_name = config.SKU_REPLACEMENTS[original_sku]
@@ -255,20 +277,48 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
     with ThreadPoolExecutor(max_workers=len(order['items'])) as executor:
         processed_items = list(executor.map(lambda item: process_item(item, mlp_data), [item for item in order['items'] if item['sku']]))
 
-    order['items'] = [item for item, _ in processed_items]
-
     weight = sum([w for _, w in processed_items])
 
+    order['items'] = []
+
+    for item, _ in processed_items:
+        # Add the item to the order
+        order['items'].append(item)
+
+        # If the item sku contains 'HERO', add the relevant items from config
+        if 'HERO' in item['sku']:
+            box = 'Box1'
+            if '3 of' in item['name']:
+                box = 'Box3'
+            elif '2 of' in item['name']:
+                box = 'Box2'
+            elif '1 of' not in item['name']:
+                if item['sku'] == 'SUB - HERO - S':
+                    item['name'] = config.hero_standard[0]
+                else:
+                    item['name'] = config.hero_giant[0]
+            for hero_item in config.hero_bundle_items[item['sku']][box]:
+                # Apply additional logic if the item is a Lawn Plan
+                if isLawnPlan(hero_item['sku']):
+                    for sku, products_info in mlp_data.items():
+                        if sku == item['sku']:
+                            for product_info in products_info:
+                                if 'Plan' not in product_info['name']:
+                                    hero_item['name'] += f"\n\u00A0\u00A0\u00A0\u00A0• {product_info['count']} {product_info['name']}"
+                                    weight += config.product_weights[product_info['name']]*int(product_info['count'])
+                order['items'].append(hero_item)
     if total_pouches == 0:
         order = update_dict(order, config.other_usps_items)
         order['weight']['value'] = weight
         return order
-
+    
     preset_dict = config.presets_with_stk if use_stk_preset else config.presets
+    
     
     preset_key = str(total_pouches)
     if preset_key in preset_dict:
         preset = copy.deepcopy(preset_dict[preset_key])
+    
     
     updated_order = order.copy()
     updated_order = update_dict(updated_order, preset)
@@ -285,14 +335,18 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
         yellow_sprayers['quantity'] = mlp_data['OTP - HES - Y'][0]['count']
         updated_order['items'].append(yellow_sprayers)
 
+
     updated_order['weight']['value'] += weight
 
     if 'advancedOptions' in updated_order and 'advancedOptions' in preset:
         updated_order['advancedOptions'] = update_dict(updated_order['advancedOptions'], preset['advancedOptions'])
     elif 'advancedOptions' not in updated_order and 'advancedOptions' in preset:
         updated_order['advancedOptions'] = preset['advancedOptions']
-
-    rate_shop(updated_order)
+    
+    try:
+        rate_shop(updated_order)
+    except:
+        no_rate.append(updated_order['orderNumber'])
 
     return updated_order
 
@@ -563,15 +617,24 @@ def submit_order(order):
     response = session.post('https://ssapi.shipstation.com/orders/createorder', data=json.dumps(order))
     return response
 
-def total_pouches(order):
-    return sum(item['quantity'] * config.sku_to_pouches.get(item['sku'], 0) for item in order['items'])
+def total_pouches(order, initial_check=False):
+    total_pouches = 0
+    for item in order['items']:
+        if 'HERO' in item['sku'] and initial_check and "-" not in order['orderNumber']:
+            total_pouches += item['quantity'] * config.hero_base_pouches.get(item['sku'])
+        else:
+            total_pouches += item['quantity'] * config.sku_to_pouches.get(item['sku'], 0)
+    return total_pouches
+
 
 def process_order(order, mlp_data):
-    is_parent = ("-" not in order['orderNumber'] or "-1" in order['orderNumber']) and order['advancedOptions']['storeId'] != 310067
+    #is_parent = ("-" not in order['orderNumber'] or "-1" in order['orderNumber']) and order['advancedOptions']['storeId'] != 310067
+
+    is_parent = "-" not in order['orderNumber'] or "-1" in order['orderNumber']
     
     need_gnome = is_parent and should_add_gnome_to_parent_order(order)
 
-    parent_pouches = total_pouches(order)
+    parent_pouches = total_pouches(order, True)
 
     if "-" not in order['orderNumber'] and parent_pouches > 10:
         # Prepare the child orders and parent order
@@ -598,10 +661,12 @@ def process_order(order, mlp_data):
         return
 
     else:
-        if need_gnome:
+        if any('HERO' in item['sku'] for item in order['items']):
+            order['items'].append(config.golden_gnome)
+        elif need_gnome:
             gnome_item = config.gnome
             order['items'].append(gnome_item)
-        if any('STK' in item['sku'] or 'LYL' in item['sku'] for item in order['items']): 
+        if any('STK' in item['sku'] or 'LYL' in item['sku'] for item in order['items']):
             order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent, True)
         else:
             order = apply_preset_based_on_pouches(order, mlp_data, parent_pouches, is_parent)
@@ -610,21 +675,23 @@ def process_order(order, mlp_data):
         response = submit_order(order)
 
         if response.status_code == 200:
+            success.append(str(order['orderNumber']))
             print(f"(Log for #{order['orderNumber']}) Successfully processed order #{order['orderNumber']} without splitting", flush=True)
             print(f"(Log for #{order['orderNumber']}) Full success response: {response.__dict__}", flush=True)
         else:
-            if response.status_code == 429:
-                rate_limited.append(order)
             failed.append(order['orderNumber'])
+            if response.status_code == 429:
+                rate_limited.append(order['orderNumber'])
             print(f"(Log for #{order['orderNumber']}) Unexpected status code for order #{order['orderNumber']}: {response.status_code}", flush=True)
             print(f"(Log for #{order['orderNumber']}) Full error response: {response.__dict__}", flush=True)
         return
 
-def first_fit_decreasing(items, otp_lyl_present, max_pouches_per_bin=10):
+
+def first_fit_decreasing(items, otp_lyl_present, existing_bins=None, max_pouches_per_bin=10):
     if otp_lyl_present:
         items = [(sku, count) for sku, count in items if sku != 'OTP - LYL']
     items = sorted(items, key=lambda x: x[1], reverse=True)
-    bins = []
+    bins = existing_bins if existing_bins else []
 
     for item in items:
         remaining_pouches = item[1]
@@ -657,47 +724,85 @@ def first_fit_decreasing(items, otp_lyl_present, max_pouches_per_bin=10):
     return bins
 
 
+
 def prepare_split_data(order, mlp_data, need_gnome):
     original_order = copy.deepcopy(order)
     child_orders = []
+    
+    hero_skus = ["SUB - HERO - S", "SUB - HERO - G"]
+    hero_bins = {}
 
-    items_with_quantity = [
-        (item['sku'], item['quantity'])
-        for item in original_order['items'] if item['sku']
-    ]
-
+    items_with_quantity = []
+    for item in original_order['items']:
+        if item['sku'] and item['sku'] not in hero_skus:
+            items_with_quantity.append((item['sku'], item['quantity']))
+        elif item['sku'] in hero_skus:
+            # split hero sku into bins and update corresponding pouch counts
+            if item['sku'] == "SUB - HERO - S":
+                hero_bins["SUB - HERO - S"] = []
+                hero_bins["SUB - HERO - S"].append([(item['sku'], 1)]) 
+                hero_bins["SUB - HERO - S"].append([("1" + item['sku'], 1)]) 
+            elif item['sku'] == "SUB - HERO - G":
+                hero_bins["SUB - HERO - G"] = []
+                hero_bins["SUB - HERO - G"].append([(item['sku'], 1)]) 
+                hero_bins["SUB - HERO - G"].append([("1" + item['sku'], 1)])
+                hero_bins["SUB - HERO - G"].append([("2" + item['sku'], 1)])
+    
+                
     otp_lyl_present = any('LYL' in item['sku'] for item in original_order['items'])
     stk_order = otp_lyl_present
 
-    bins = first_fit_decreasing(items_with_quantity, otp_lyl_present)
+    existing_bins = []
+    for bins in hero_bins.values():
+        existing_bins.extend(bins)
 
+    bins = first_fit_decreasing(items_with_quantity, otp_lyl_present, existing_bins=existing_bins)
+    
+    
     stk_item = next(
         (item for item in original_order['items'] if item['sku'] == 'OTP - STK'), None
     )
     if stk_item:
         bins[0].append(('OTP - STK', 1))
-
+        
     parent_items = bins[0]
     total_shipments = len(bins)
+    excluded_skus = {"SUB - WW - D", "SUB - WW - S", "SUB - WW - G"}
 
-    # Check if the order has green sprayers
+    # Green Sprayers
     if 'OTP - HES - G' in mlp_data:
         # Extract and divide the green sprayers
         green_sprayers = mlp_data.get('OTP - HES - G', [{'count': 0}])[0]['count']
-        sprayers_per_order = green_sprayers // total_shipments
-        remainder = green_sprayers % total_shipments
-
+        # Identify bins that should receive sprayers
+        sprayer_bins = [bin for bin in bins if not {sku for sku, quantity in bin}.issubset(excluded_skus)] # Changed bins[1:] to bins
+        num_sprayer_bins = len(sprayer_bins)
+        sprayers_per_order = green_sprayers // num_sprayer_bins
+        remainder = green_sprayers % num_sprayer_bins
+        # Add sprayer items to each eligible bin, with an extra one for the first 'remainder' bins
+        for i, bin in enumerate(sprayer_bins):
+            bin.append(('OTP - HES - G', sprayers_per_order + (i < remainder)))
         # Update the count in mlp_data
-        mlp_data['OTP - HES - G'][0]['count'] = sprayers_per_order + remainder
+        mlp_data['OTP - HES - G'][0]['count'] = sprayers_per_order * num_sprayer_bins + remainder
 
-        # Add sprayer items to each bin
-        for bin in bins[1:]:  # Skip the first bin (parent order)
-            bin.append(('OTP - HES - G', sprayers_per_order))
+    # Yellow Sprayers
+    yellow_sprayer_skus = ['SUB - LG - D', 'SUB - LG - S', 'SUB - LG - G', 'OTP - WNF', "SUB - HERO - D", "1SUB - HERO - S", "2SUB - HERO - G"]
+    if 'OTP - HES - Y' in mlp_data:
+        # Extract and divide the yellow sprayers
+        yellow_sprayers = mlp_data.get('OTP - HES - Y', [{'count': 0}])[0]['count']
+        # Identify bins that should receive yellow sprayers
+        yellow_sprayer_bins = [bin for bin in bins if any(sku in yellow_sprayer_skus for sku, quantity in bin)] # Changed bins[1:] to bins
+        num_yellow_sprayer_bins = len(yellow_sprayer_bins)
+        yellow_sprayers_per_order = yellow_sprayers // num_yellow_sprayer_bins
+        yellow_remainder = yellow_sprayers % num_yellow_sprayer_bins
+        # Add yellow sprayer items to each eligible bin, with an extra one for the first 'yellow_remainder' bins
+        for i, bin in enumerate(yellow_sprayer_bins):
+            bin.append(('OTP - HES - Y', yellow_sprayers_per_order + (i < yellow_remainder)))
+        # Update the count in mlp_data
+        mlp_data['OTP - HES - Y'][0]['count'] = yellow_sprayers_per_order * num_yellow_sprayer_bins + yellow_remainder
 
     original_order_items = []
-
     for item in original_order['items']:
-        if not item['sku']:  # Add this condition
+        if not item['sku']:
             continue
         if item['sku'] == 'OTP - STK':
             original_order_items.append(item)
@@ -705,21 +810,22 @@ def prepare_split_data(order, mlp_data, need_gnome):
             continue
 
         parent_item = next(
-            (x for x in parent_items if x[0] == item['sku']), None
-        )
+            (x for x in parent_items if x[0] == item['sku']), None)
         if parent_item:
             item_copy = copy.deepcopy(item)
             item_copy['quantity'] = parent_item[1]
+            if item['sku'] == 'SUB - HERO - S':
+                item_copy['name'] = config.hero_standard[0]
+            elif item['sku'] == 'SUB - HERO - G':
+                item_copy['name'] = config.hero_giant[0]
             original_order_items.append(item_copy)
-
     original_order['items'] = original_order_items
-
     order_pouches = total_pouches(original_order)
     original_order = set_order_tags(original_order, order, order_pouches)
-
-    if need_gnome:
-        gnome = config.gnome
-        original_order['items'].append(gnome)
+    if any('HERO' in item['sku'] for item in original_order['items']):
+        original_order['items'].append(config.golden_gnome)
+    elif need_gnome:
+        original_order['items'].append(config.gnome)
     if stk_order:
         original_order = apply_preset_based_on_pouches(
             original_order, mlp_data, order_pouches, is_parent=True, use_stk_preset=True
@@ -728,28 +834,25 @@ def prepare_split_data(order, mlp_data, need_gnome):
         original_order = apply_preset_based_on_pouches(
             original_order, mlp_data, order_pouches, is_parent=True
         )
-
     with ThreadPoolExecutor(max_workers=len(bins) - 1) as executor:
         args_list = [
             (bin_index, bin, order, mlp_data, total_shipments)
             for bin_index, bin in enumerate(bins[1:])
         ]
         child_orders = []
-
         for result in executor.map(prepare_child_order, args_list):
             child_orders.append(result)
-
     original_order['orderNumber'] = f"{original_order['orderNumber']}-1"
     original_order['advancedOptions']['customField3'] = f"Shipment 1 of {total_shipments}"
-
     print(f"(Log for #{order['orderNumber']}) Parent order for {order['orderNumber']}: {original_order}", flush=True)
-    print(f"(Log for #{order['orderNumber']}) Child_orders for {order['orderNumber']}: {child_orders}", flush=True)
-
+    print(f"(Log for #{order['orderNumber']}) Child orders for {order['orderNumber']}: {child_orders}", flush=True)
     return original_order, child_orders
+
 
 
 def prepare_child_order(args):
     bin_index, bin, parent_order, mlp_data, total_shipments = args
+
     child_order = copy.deepcopy(parent_order)
     if 'orderId' in child_order:
         del child_order['orderId']
@@ -758,13 +861,27 @@ def prepare_child_order(args):
     child_order['advancedOptions']['customField1'] = ''
     child_order['advancedOptions']['customField3'] = f"Shipment {bin_index+2} of {total_shipments}"
     
+    child_pouches = 0
     child_order_items = []
     for sku, item_count in bin:
-        item = next((i for i in parent_order['items'] if i['sku'] == sku), None)
+        temp_sku = sku
+        if '1' in sku or '2' in sku:
+            temp_sku = sku[1:]
+        item = next((i for i in parent_order['items'] if i['sku'] == temp_sku), None)
         if item is not None:
             item_copy = copy.deepcopy(item)
             item_copy['quantity'] = item_count
             if item_copy['quantity'] > 0:
+                child_pouches += item_copy['quantity'] * config.sku_to_pouches.get(sku, 0)
+                if sku == '1SUB - HERO - S':
+                    item_copy['name'] = config.hero_standard[1]
+                    item_copy['sku'] = 'SUB - HERO - S'
+                elif sku == '1SUB - HERO - G':
+                    item_copy['name'] = config.hero_giant[1]
+                    item_copy['sku'] = 'SUB - HERO - G'
+                elif sku == '2SUB - HERO - G':
+                    item_copy['name'] = config.hero_giant[2]
+                    item_copy['sku'] = 'SUB - HERO - G'
                 child_order_items.append(item_copy)
         else:
             # Handle the sprayers
@@ -777,7 +894,6 @@ def prepare_child_order(args):
     child_order['items'] = child_order_items
     child_order['orderTotal'] = 0.00
     child_order['orderKey'] = str(uuid.uuid4())
-    child_pouches = total_pouches(child_order)
 
     child_order = apply_preset_based_on_pouches(child_order, mlp_data, child_pouches)
 
