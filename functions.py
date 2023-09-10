@@ -42,11 +42,7 @@ def processor(order):
     
     order_number = order['orderNumber']
 
-    weed_wizard_skus = ["SUB - WW - D" , "SUB - WW - S" , "SUB - WW - G" ]
-
-    non_weed_wizard_items = [item for item in order['items'] if item['sku'] not in weed_wizard_skus]
-
-    weed_wizard_only_order = len(non_weed_wizard_items) <= 1 and all(not item.get('sku') for item in non_weed_wizard_items)
+    sprayer_order = any(item['sku'] and item['sku'] not in config.non_sprayer_skus for item in order['items'])
     
     has_lawn_plan = any(isLawnPlan(item["sku"]) for item in order["items"])
     
@@ -68,11 +64,11 @@ def processor(order):
 
         else:
     
-            data_mlp = response_mlp.json()
+            data_mlp = response_mlp.json()[0]
             
             # Check for green_sprayers
             green_sprayers = int(data_mlp.get("green_sprayers", 0))
-            if green_sprayers > 0 and not weed_wizard_only_order:
+            if green_sprayers > 0 and sprayer_order:
                 mlp_data['OTP - HES - G'] = [{'name': 'Reusable Sprayer', 'count': green_sprayers}]
         
             # Check for yellow_sprayers
@@ -120,6 +116,7 @@ def extract_data_from_resource_url(event, retries=3):
             response = session.get(resource_url)
             data = response.json()
             orders = data['orders']
+            print(f"All orders: {orders}")
             return orders
         except Exception as e:
             if attempts < retries:
@@ -303,7 +300,7 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
                     for sku, products_info in mlp_data.items():
                         if sku == item['sku']:
                             for product_info in products_info:
-                                if 'Plan' not in product_info['name']:
+                                if not any(term in product_info['name'] for term in ['Plan', 'Wizard', 'Defense', 'Guard']):
                                     hero_item['name'] += f"\n\u00A0\u00A0\u00A0\u00A0• {product_info['count']} {product_info['name']}"
                                     weight += config.product_weights[product_info['name']]*int(product_info['count'])
                 order['items'].append(hero_item)
@@ -311,13 +308,23 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
         order = update_dict(order, config.other_usps_items)
         order['weight']['value'] = weight
         return order
-    
-    preset_dict = config.presets_with_stk if use_stk_preset else config.presets
-    
-    
-    preset_key = str(total_pouches)
-    if preset_key in preset_dict:
-        preset = copy.deepcopy(preset_dict[preset_key])
+
+    mosquito_skus = ["OTP - MD" , "OTP - MD-2" , "OTP - MD-3", "SUB - MDA - D", "SUB - MDA - S", "SUB - MDA - G", "SUB - MD - D", "SUB - MD - S", "SUB - MD - G",]
+
+    non_mosquito_items = [item for item in order['items'] if item['sku'] not in mosquito_skus]
+
+    mosquito_only_order = len(non_mosquito_items) == 0
+
+    if mosquito_only_order:
+        preset = copy.deepcopy(config.mosquito_only_preset)
+
+    else:
+        preset_dict = config.presets_with_stk if use_stk_preset else config.presets
+        
+        
+        preset_key = str(total_pouches)
+        if preset_key in preset_dict:
+            preset = copy.deepcopy(preset_dict[preset_key])
     
     
     updated_order = order.copy()
@@ -343,10 +350,7 @@ def apply_preset_based_on_pouches(order, mlp_data, total_pouches, is_parent = Fa
     elif 'advancedOptions' not in updated_order and 'advancedOptions' in preset:
         updated_order['advancedOptions'] = preset['advancedOptions']
     
-    try:
-        rate_shop(updated_order)
-    except:
-        no_rate.append(updated_order['orderNumber'])
+    rate_shop(updated_order)
 
     return updated_order
 
@@ -580,12 +584,52 @@ def get_shipstation_ups_rate(order):
     return rates[0]['shipmentCost'] + rates[0]['otherCost']
 
 
+def get_shipstation_usps_rate(order):
+    url = "https://ssapi.shipstation.com/shipments/getrates"
+
+    payload = {
+        "carrierCode": 'stamps_com',
+        "serviceCode": 'usps_ground_advantage',
+        "packageCode": 'package',
+        "fromPostalCode": '90232',
+        "fromCity": "Culver City",
+        "fromState": "CA",
+        "toCountry": 'US',
+        "toState": order['shipTo']['state'],
+        "toPostalCode": order['shipTo']['postalCode'],
+        "toCity": order['shipTo']['city'],
+        "weight": order['weight'],
+        "dimensions": order['dimensions'],
+        "confirmation": None,
+        "residential": order['shipTo']['residential']
+    }
+
+    headers = {
+        'Host': 'ssapi.shipstation.com',
+        'Authorization': f"Basic {encoded_auth_string}",
+        'Content-Type': 'application/json',
+        "X-Partner": config.x_partner
+    }
+
+    response = session.post(url, headers=headers, data=json.dumps(payload))
+    rates = response.json()
+
+    return rates[0]['shipmentCost'] + rates[0]['otherCost']
+
+def rate_helper(rate_function, order):
+    try:
+        return rate_function(order)
+    except Exception as e:
+        print(f"(Log for #{order['orderNumber']}) Error fetching rate using function '{rate_function.__name__}': {e}")
+        return None
+
+
 def rate_shop(order):
     fedex_service = 'fedex_home_delivery' if order['shipTo']['residential'] else 'fedex_ground'
 
-    carrier_codes = ['fedex', 'ups_walleted', 'ups']
-    service_codes = [fedex_service, 'ups_ground', 'ups_ground']
-    bill_to_accounts = [990329, 326495, 647173]  # Assuming this is the order for 'fedex', 'ups_walleted', 'ups'
+    carrier_codes = ['fedex', 'ups_walleted', 'ups', 'stamps_com']
+    service_codes = [fedex_service, 'ups_ground', 'ups_ground', 'usps_ground_advantage']
+    bill_to_accounts = [990329, 326495, 647173, 326494]
 
     cheapest_rate = None
     cheapest_carrier = None
@@ -595,22 +639,28 @@ def rate_shop(order):
     for carrier_code, service_code, account in zip(carrier_codes, service_codes, bill_to_accounts):
         # Get rate based on carrier
         if carrier_code == 'fedex':
-            rate = get_fedex_rate(order)
+            rate = rate_helper(get_fedex_rate, order)
         elif carrier_code == 'ups_walleted':
-            rate = get_shipstation_ups_rate(order)
+            rate = rate_helper(get_shipstation_ups_rate, order)
+        elif carrier_code == 'ups':
+            rate = rate_helper(get_ups_rate, order)
         else:
-            rate = get_ups_rate(order)
+            rate = rate_helper(get_shipstation_usps_rate, order)
 
         # Check if the rate is the cheapest so far
-        if cheapest_rate is None or rate < cheapest_rate:
+        if rate is not None and (cheapest_rate is None or rate < cheapest_rate):
             cheapest_rate = rate
             cheapest_carrier = carrier_code
             cheapest_service = service_code
             cheapest_account = account
 
-    order['carrierCode'] = cheapest_carrier
-    order['serviceCode'] = cheapest_service
-    order['advancedOptions']['billToMyOtherAccount'] = cheapest_account
+    if cheapest_rate and cheapest_carrier and cheapest_service and cheapest_account:
+        order['carrierCode'] = cheapest_carrier
+        order['serviceCode'] = cheapest_service
+        order['advancedOptions']['billToMyOtherAccount'] = cheapest_account
+    else:
+        no_rate.append(updated_order['orderNumber'])
+        print(f"(Log for #{order['orderNumber']}) Error, unable to retrieve shipping rates")
 
 
 def submit_order(order):
@@ -675,7 +725,6 @@ def process_order(order, mlp_data):
         response = submit_order(order)
 
         if response.status_code == 200:
-            success.append(str(order['orderNumber']))
             print(f"(Log for #{order['orderNumber']}) Successfully processed order #{order['orderNumber']} without splitting", flush=True)
             print(f"(Log for #{order['orderNumber']}) Full success response: {response.__dict__}", flush=True)
         else:
@@ -767,14 +816,13 @@ def prepare_split_data(order, mlp_data, need_gnome):
         
     parent_items = bins[0]
     total_shipments = len(bins)
-    excluded_skus = {"SUB - WW - D", "SUB - WW - S", "SUB - WW - G"}
 
     # Green Sprayers
     if 'OTP - HES - G' in mlp_data:
         # Extract and divide the green sprayers
         green_sprayers = mlp_data.get('OTP - HES - G', [{'count': 0}])[0]['count']
         # Identify bins that should receive sprayers
-        sprayer_bins = [bin for bin in bins if not {sku for sku, quantity in bin}.issubset(excluded_skus)] # Changed bins[1:] to bins
+        sprayer_bins = [bin for bin in bins if not {sku for sku, quantity in bin}.issubset(config.non_sprayer_skus)] # Changed bins[1:] to bins
         num_sprayer_bins = len(sprayer_bins)
         sprayers_per_order = green_sprayers // num_sprayer_bins
         remainder = green_sprayers % num_sprayer_bins
@@ -782,7 +830,7 @@ def prepare_split_data(order, mlp_data, need_gnome):
         for i, bin in enumerate(sprayer_bins):
             bin.append(('OTP - HES - G', sprayers_per_order + (i < remainder)))
         # Update the count in mlp_data
-        mlp_data['OTP - HES - G'][0]['count'] = sprayers_per_order * num_sprayer_bins + remainder
+        mlp_data['OTP - HES - G'][0]['count'] = sprayers_per_order + (remainder > 0)
 
     # Yellow Sprayers
     yellow_sprayer_skus = ['SUB - LG - D', 'SUB - LG - S', 'SUB - LG - G', 'OTP - WNF', "SUB - HERO - D", "1SUB - HERO - S", "2SUB - HERO - G"]
@@ -798,7 +846,7 @@ def prepare_split_data(order, mlp_data, need_gnome):
         for i, bin in enumerate(yellow_sprayer_bins):
             bin.append(('OTP - HES - Y', yellow_sprayers_per_order + (i < yellow_remainder)))
         # Update the count in mlp_data
-        mlp_data['OTP - HES - Y'][0]['count'] = yellow_sprayers_per_order * num_yellow_sprayer_bins + yellow_remainder
+        mlp_data['OTP - HES - Y'][0]['count'] = yellow_sprayers_per_order + (yellow_remainder > 0)
 
     original_order_items = []
     for item in original_order['items']:
